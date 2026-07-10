@@ -28,9 +28,9 @@ set -euo pipefail
 
 # --- Config -----------------------------------------------------------------
 GNO_REPO="${GNO_REPO:-gnolang/gno}"
-# Pinned to the official commit that introduced tmkms_listener support
-# (gnolang/gno PR #5718). Bump to a newer gnolang/gno commit as needed.
-GNO_VERSION="${GNO_VERSION:-a870686e4f72453fd150b3f08b49caaec97be6fa}"
+# Defaults match validator.env.example (gnolang/gno @ master). master carries
+# tmkms_listener support (PR #5718). Override GNO_VERSION to pin a commit.
+GNO_VERSION="${GNO_VERSION:-master}"
 CHAIN_ID="${CHAIN_ID:-gno-tmkms-e2e}"
 RPC_PORT="${RPC_PORT:-36657}"
 P2P_PORT="${P2P_PORT:-36656}"
