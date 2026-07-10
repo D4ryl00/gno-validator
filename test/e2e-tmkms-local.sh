@@ -27,10 +27,10 @@
 set -euo pipefail
 
 # --- Config -----------------------------------------------------------------
-GNO_REPO="${GNO_REPO:-D4ryl00/gno}"
-# Pinned to a commit that carries the tmkms_listener support. Bump when the
-# feature lands elsewhere (e.g. upstream gnolang/gno master).
-GNO_VERSION="${GNO_VERSION:-e613f4a13c1347a7eb359feb23f771c58b3818aa}"
+GNO_REPO="${GNO_REPO:-gnolang/gno}"
+# Pinned to the official commit that introduced tmkms_listener support
+# (gnolang/gno PR #5718). Bump to a newer gnolang/gno commit as needed.
+GNO_VERSION="${GNO_VERSION:-a870686e4f72453fd150b3f08b49caaec97be6fa}"
 CHAIN_ID="${CHAIN_ID:-gno-tmkms-e2e}"
 RPC_PORT="${RPC_PORT:-36657}"
 P2P_PORT="${P2P_PORT:-36656}"

@@ -2,7 +2,7 @@
 # uses it to synthesize a genesis.json containing the test validator. This is NOT
 # part of the shipped validator images (operators provide their own genesis.json).
 FROM    golang:1.25-alpine AS build
-ARG     GNO_REPO=D4ryl00/gno
+ARG     GNO_REPO=gnolang/gno
 ARG     GNO_VERSION=master
 RUN     apk add --no-cache git
 RUN     git clone https://github.com/${GNO_REPO}.git /src && \
