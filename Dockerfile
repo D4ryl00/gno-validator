@@ -1,5 +1,7 @@
-# ----- Builder stage: clones gno source, builds gnoland, gnokms, and gnokey binaries
-FROM    golang:1.24-alpine AS builder
+# ----- Builder stage: clones gno source, builds the gnoland binary
+# Go 1.25+ is required by gno versions carrying the tmkms_listener support
+# (their go.mod requires >= 1.25.x); backward-compatible with older gno.
+FROM    golang:1.25-alpine AS builder
 ENV     GNOROOT="/gnoroot"
 ARG     GNO_VERSION=master
 ARG     GNO_REPO=gnolang/gno
@@ -13,8 +15,6 @@ RUN     git clone https://github.com/${GNO_REPO}.git /gnoroot && \
 WORKDIR /gnoroot
 
 RUN     go build -o /usr/local/bin/gnoland ./gno.land/cmd/gnoland
-RUN     go build -C ./contribs/gnokms -o /usr/local/bin/gnokms .
-RUN     go build -o /usr/local/bin/gnokey ./gno.land/cmd/gnokey
 
 # ----- gnoland final stage
 FROM    alpine:3 AS gnoland
@@ -46,8 +46,25 @@ RUN     chmod +x /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]
 
-# ----- gnokms final stage
-FROM    alpine:3 AS gnokms
+# ----- tmkms builder stage: builds tmkms from source (softsign backend only)
+# tmkms is not published as a pre-built binary, so we `cargo install` a pinned
+# version. The softsign feature needs only a C compiler — no libusb/OpenSSL
+# (those are pulled in by the yubihsm/ledger backends, which we don't build).
+# Cold build is ~5 min; pinning TMKMS_VERSION keeps it cacheable.
+FROM    rust:1-slim-bookworm AS tmkms-builder
+ARG     TMKMS_VERSION=0.15.0
+# build-essential + pkg-config/libssl/libusb/libudev cover tmkms's native build
+# deps on slim Debian (ubuntu-latest, where gno's CI builds it, ships these). The
+# heavy HSM backends aren't built (softsign feature), but their -sys crates may
+# still probe for the libs during resolution — installing them keeps the build
+# robust across tmkms default-feature changes.
+RUN     apt-get update && apt-get install -y --no-install-recommends \
+  build-essential pkg-config libssl-dev libusb-1.0-0-dev libudev-dev && \
+  rm -rf /var/lib/apt/lists/*
+RUN     cargo install tmkms --version ${TMKMS_VERSION} --features softsign --locked --root /usr/local
+
+# ----- tmkms final stage
+FROM    debian:bookworm-slim AS tmkms
 ARG     GNO_COMMIT_HASH
 ARG     GNO_VERSION=master
 ARG     GNO_REPO=gnolang/gno
@@ -64,12 +81,12 @@ LABEL   gno.commit="${GNO_COMMIT_HASH}" \
   build.dockerfile_hash="${DOCKERFILE_HASH}" \
   build.entrypoint_hash="${ENTRYPOINT_HASH}"
 
-RUN     apk add --no-cache ca-certificates
+RUN     apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
+  rm -rf /var/lib/apt/lists/*
 
-COPY    --from=builder /usr/local/bin/gnokms /usr/local/bin/gnokms
-COPY    --from=builder /usr/local/bin/gnokey /usr/local/bin/gnokey
+COPY    --from=tmkms-builder /usr/local/bin/tmkms /usr/local/bin/tmkms
 
-COPY    docker/gnokms-entrypoint.sh /entrypoint.sh
+COPY    docker/tmkms-entrypoint.sh /entrypoint.sh
 RUN     chmod +x /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]

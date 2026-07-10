@@ -12,7 +12,8 @@ genesis.json
 
 # Node data — contains secrets and chain state
 gnoland-data/
-gnokms-data/
+tmkms-data/
+tmkms-sock/
 
 # Downloaded tool binaries (gonzo, jq) — fetched on demand, not tracked
 .tools/bin/

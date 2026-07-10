@@ -30,9 +30,11 @@ do_init() {
   fi
 
   # ---- Apply hardcoded config overrides required by the Docker setup
+  # The signer is operator-driven: leaving consensus.priv_validator.tmkms_listener
+  # and remote_signer unset uses gnoland's local file signer. To use tmkms, set
+  # consensus.priv_validator.tmkms_listener.* in config.overrides (see the example).
   gnoland config set p2p.laddr tcp://0.0.0.0:26656 >/dev/null
   gnoland config set rpc.laddr tcp://0.0.0.0:26657 >/dev/null
-  gnoland config set consensus.priv_validator.remote_signer.server_address unix:///sock/gnokms.sock >/dev/null
   gnoland config set telemetry.metrics_enabled true >/dev/null
   gnoland config set telemetry.traces_enabled true >/dev/null
   gnoland config set telemetry.exporter_endpoint http://sentinel:4318 >/dev/null

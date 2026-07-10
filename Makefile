@@ -1,4 +1,4 @@
-# Makefile — gno-validator: gnoland validator node with gnokms remote signing.
+# Makefile — gno-validator: gnoland validator node with optional tmkms remote signing.
 #
 # Usage: make <target> [args]
 #
@@ -9,19 +9,19 @@
 #   reset                            Wipe chain state (db, wal, priv_validator_state.json).
 #   update         [force=1]         Rebuild images and/or recreate containers if anything
 #                                    has changed since the last build/start. force=1 does it anyway.
-#                                    Recreate loses container logs but preserves chain data + keystore.
+#                                    Recreate loses container logs but preserves chain data + signing keys.
 #
 # Inspection:
 #   status         [watch=<sec>]     Show block height, peers, and validator status (watch= refreshes every N seconds)
 #   infos                            Print node identity, network config, build metadata, checksums
-#   logs           [since=<d>]       Open merged TUI of gnoland + gnokms + sentinel logs — downloads gonzo on first run.
+#   logs           [since=<d>]       Open merged TUI of gnoland + sentinel (+ tmkms in local mode) logs — downloads gonzo on first run.
 #
 # Cleanup:
 #   clean-imgs     [all=1] [yes=1]   Remove stale images (default). all=1 also removes current images and sentinel.
 #                                    yes=1 skips the confirm prompt.
 #
 # Setup:
-#   gen-identity                     Generate the validator signing identity in the gnokms keystore
+#   gen-identity                     Generate/show the validator identity (and tmkms softsign key in local mode)
 #   help                             Show this help message
 #
 # Configuration:

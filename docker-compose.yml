@@ -1,10 +1,15 @@
 name: gno-validator
 
 services:
-  gnokms:
+  # Optional bundled tmkms signer (softsign, dev/lab). Only started when the
+  # 'tmkms-local' compose profile is active — the Makefile activates it when
+  # config.overrides selects a unix:// tmkms_listener.listen_addr. For a remote
+  # tmkms (tcp:// listener) no tmkms container runs; the signer lives off-host.
+  tmkms:
+    profiles: ['tmkms-local']
     build:
       context: .
-      target: gnokms
+      target: tmkms
       args:
         GNO_VERSION: ${GNO_VERSION:-master}
         GNO_REPO: ${GNO_REPO:-gnolang/gno}
@@ -12,12 +17,18 @@ services:
         BUILD_DATE: ${BUILD_DATE:-}
         DOCKERFILE_HASH: ${DOCKERFILE_HASH:-}
         ENTRYPOINT_HASH: ${ENTRYPOINT_HASH:-}
-    image: gno-validator-gnokms
+    image: gno-validator-tmkms
+    # Same host user as gnoland so it can read the consensus key, write state,
+    # and reach the socket gnoland creates (0600, owned by this user).
+    user: '${HOST_UID:-0}:${HOST_GID:-0}'
     environment:
-      GNOKMS_PASSWORD: ${GNOKMS_PASSWORD:-}
+      TMKMS_CHAIN_ID: ${TMKMS_CHAIN_ID:-}
     volumes:
-      - ./gnokms-data:/gnokms-data
-      - gnokms-sock:/sock
+      - ./tmkms-data:/tmkms-data
+      # Host bind mount (not a named volume) so gnoland — running as the non-root
+      # host user — can create the listener socket here; a named volume's root is
+      # root-owned and would block that.
+      - ./tmkms-sock:/tmkms-sock
     restart: unless-stopped
     logging:
       driver: json-file
@@ -53,13 +64,16 @@ services:
       - ./gnoland-data:/gnoland-data
       - ./genesis.json:/genesis.json:ro
       - ./config.overrides:/config.overrides:ro
-      - gnokms-sock:/sock
+      # Shared with the tmkms container in local mode: gnoland creates the
+      # privval listener socket here and tmkms dials it. Host bind mount so the
+      # non-root gnoland user owns the directory and can create the socket.
+      - ./tmkms-sock:/tmkms-sock
     ports:
       - '${GNOLAND_RPC_LADDR:-0.0.0.0}:${GNOLAND_RPC_PORT:-26657}:26657'
       - '${GNOLAND_P2P_LADDR:-0.0.0.0}:${GNOLAND_P2P_PORT:-26656}:26656'
-    depends_on:
-      gnokms:
-        condition: service_started
+      # tmkms privval listener (remote mode). Inert unless config.overrides sets
+      # a tcp:// tmkms_listener.listen_addr. Host binding via TMKMS_LISTEN_*.
+      - '${TMKMS_LISTEN_LADDR:-0.0.0.0}:${TMKMS_LISTEN_PORT:-26659}:26659'
     cap_add:
       - SYS_TIME
     restart: on-failure
@@ -82,6 +96,3 @@ services:
       options:
         max-size: '100m'
         max-file: '1'
-
-volumes:
-  gnokms-sock:

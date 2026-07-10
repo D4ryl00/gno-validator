@@ -1,7 +1,12 @@
 # gno-validator
 
-Docker Compose setup for a `gnoland` validator node with `gnokms` remote signing.
-Both services are built from source (`gnolang/gno`).
+Docker Compose setup for a `gnoland` validator node.
+By default the node signs with its built-in local file signer; optionally it can
+use [`tmkms`](https://github.com/iqlusioninc/tmkms) as a remote signer — either a
+**bundled** tmkms container on the same host (dev/lab) or an **external** tmkms on
+a dedicated host (production). The signer is selected entirely in `config.overrides`.
+`gnoland` is built from source (`gnolang/gno`); the bundled tmkms image is built
+from source (`iqlusioninc/tmkms`, softsign backend) only when local mode is used.
 A `sentinel` sidecar ships node metrics, logs, and OTLP traces to an external [gno-watchtower](https://github.com/aeddi/gno-watchtower) server.
 
 ## Prerequisites
@@ -15,7 +20,7 @@ Seven-step quick start. Each step links to the matching detailed section below w
 
 ### 1. `validator.env`
 
-Environment variables (image tags, host ports, password handling, gnoland flags). Copy the example and edit — at minimum review `GNOKMS_PASSWORD` handling. See [validator.env reference](#validatorenv-reference) for the full list.
+Environment variables (image tags, host ports, gnoland flags). Copy the example and edit. See [validator.env reference](#validatorenv-reference) for the full list.
 
 ```sh
 cp validator.env.example validator.env
@@ -46,7 +51,11 @@ $EDITOR sentinel.toml
 make gen-identity
 ```
 
-Creates the key `gnokms-docker-key` in `gnokms-data/keystore/`. Uses `GNOKMS_PASSWORD` from `validator.env` if set; otherwise prompts interactively.
+Behavior depends on the signer selected in `config.overrides` (see [Signing](#signing)):
+
+- **local file signer** (default) — creates `gnoland-data/secrets/priv_validator_key.json` and prints the validator address / pub_key / node peer ID.
+- **local tmkms** (`unix://` listener) — also writes `tmkms-data/consensus.key` (the softsign consensus key, derived from the same validator key) for the bundled tmkms container.
+- **remote tmkms** (`tcp://` listener) — generates no signing key locally; prints the node peer ID and the values to exchange with the tmkms operator.
 
 ### 5. Provide `genesis.json`
 
@@ -62,7 +71,7 @@ cp /path/to/genesis.json .
 make start
 ```
 
-Builds the gnoland + gnokms images on first run (minutes), creates containers, starts the node.
+Builds the gnoland image on first run (minutes; also the tmkms image if local tmkms is selected — the Rust build adds several minutes), creates containers, starts the node.
 
 ### 7. Verify
 
@@ -79,7 +88,6 @@ make status watch=5      # live status table (height, peers, VP) refreshing ever
 
 | Variable              | Default                           | Meaning                                                                                                                                                                                                                                           |
 | --------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GNOKMS_PASSWORD`     | _(unset)_                         | Decrypts the signing key. **In production, leave this unset** — see [Password security](#password-security). If set, `make start` / `make update` use it non-interactively; otherwise they prompt.                                                |
 | `GNO_VERSION`         | `master`                          | Branch, tag, or commit hash of `gnolang/gno` to build.                                                                                                                                                                                            |
 | `GNO_REPO`            | `gnolang/gno`                     | GitHub repo slug to clone gno sources from.                                                                                                                                                                                                       |
 | `SENTINEL_IMAGE_TAG`  | `latest`                          | Tag or digest for the sentinel image pulled from `ghcr.io/aeddi/gno-watchtower/sentinel`. Pin a digest (`sha256:...`) for reproducibility; drift is reported when a tag like `latest` advances on the registry.                                   |
@@ -87,6 +95,8 @@ make status watch=5      # live status table (height, peers, VP) refreshing ever
 | `GNOLAND_RPC_PORT`    | `26657`                           | Host port mapped to gnoland RPC.                                                                                                                                                                                                                  |
 | `GNOLAND_P2P_LADDR`   | `0.0.0.0`                         | Host interface gnoland P2P binds to. Use `127.0.0.1` only if this node should not accept inbound peer connections.                                                                                                                                |
 | `GNOLAND_P2P_PORT`    | `26656`                           | Host port mapped to gnoland P2P.                                                                                                                                                                                                                  |
+| `TMKMS_LISTEN_LADDR`  | `0.0.0.0`                         | Host interface for the tmkms privval listener. Only used with a **remote** (`tcp://`) tmkms signer; inert otherwise. Restrict / firewall to the signer host in production.                                                                         |
+| `TMKMS_LISTEN_PORT`   | `26659`                           | Host port mapped to the tmkms privval listener (remote mode).                                                                                                                                                                                     |
 | `GNOLAND_EXTRA_FLAGS` | `--skip-genesis-sig-verification` | Extra flags appended to `gnoland start`, word-split on whitespace. Add or remove as needed (e.g. `--skip-genesis-sig-verification --log-level info`).                                                                                             |
 | `GNOLAND_NTP_UPDATE`  | `1`                               | Any non-empty value enables in-container NTP sync at gnoland startup (tries `ntpd`, then `rdate`, then an HTTPS `Date` header; first success wins). Set empty to skip — e.g. when `chronyd` / `systemd-timesyncd` already manages the host clock. |
 | `GNOLAND_LOG_SIZE`    | `3`                               | Number of 1 GB gnoland log files to keep (3 × 1 GB = 3 GB total).                                                                                                                                                                                 |
@@ -112,13 +122,19 @@ Per-node gnoland config. Each line is `key = value`; `#` comments and blank line
 - `p2p.flush_throttle_timeout = "10ms"`
 - `p2p.max_num_outbound_peers = 40`
 
+**Signer fields** (optional; commented out by default → local file signer). Set these to use tmkms — see [Signing](#signing):
+
+- `consensus.priv_validator.tmkms_listener.listen_addr` — `unix://…` (bundled local tmkms) or `tcp://…` (remote tmkms). Empty/absent = local file signer. Set this key **last**.
+- `consensus.priv_validator.tmkms_listener.chain_id` — must match tmkms's `[[validator]].chain_id`.
+- `consensus.priv_validator.tmkms_listener.protocol_version` — must be `"v0.34"`.
+- `consensus.priv_validator.tmkms_listener.allowed_kms_pubkeys` — required (non-empty) on `tcp://`; the tmkms identity pubkey(s), comma-separated. Ignored on `unix://`.
+
 **Hardcoded overrides** — the entrypoint re-applies these after your `config.overrides` on every container start, so they always win:
 
 | Key                                                     | Value                      | Why                                                                                                       |
 | ------------------------------------------------------- | -------------------------- | --------------------------------------------------------------------------------------------------------- |
 | `p2p.laddr`                                             | `tcp://0.0.0.0:26656`      | In-container P2P bind (host interface/port via `GNOLAND_P2P_LADDR`/`GNOLAND_P2P_PORT` in `validator.env`) |
 | `rpc.laddr`                                             | `tcp://0.0.0.0:26657`      | In-container RPC bind (host interface/port via `GNOLAND_RPC_LADDR`/`GNOLAND_RPC_PORT` in `validator.env`) |
-| `consensus.priv_validator.remote_signer.server_address` | `unix:///sock/gnokms.sock` | Path to the gnokms socket shared via Docker volume                                                        |
 | `telemetry.metrics_enabled`                             | `true`                     | Sentinel collects OTLP metrics                                                                            |
 | `telemetry.traces_enabled`                              | `true`                     | Sentinel collects OTLP traces                                                                             |
 | `telemetry.exporter_endpoint`                           | `http://sentinel:4318`     | In-compose DNS name for the sentinel sidecar                                                              |
@@ -141,7 +157,7 @@ Sentinel's format is defined upstream. See [gno-watchtower → Sentinel config](
 | `make stop`             | Stops services but keeps containers (no recreate). Idempotent.                                                                                                                                  | Free.                                           |
 | `make restart`          | `stop` + `start`. Re-applies `config.overrides` on the way up.                                                                                                                                  | Free.                                           |
 | `make update [force=1]` | Rebuilds images if build inputs changed, pulls sentinel on digest drift, recreates containers if `validator.env` / `docker-compose.yml` changed. `force=1` does everything unconditionally.     | Rebuild minutes; recreate wipes container logs. |
-| `make reset [yes=1]`    | Wipes chain state (`db`, `wal`, `priv_validator_state.json`). Prompts to stop and restart around the wipe; `yes=1` skips all prompts. Preserves keystore, validator keys, and node_id.          | Destructive on chain DB.                        |
+| `make reset [yes=1]`    | Wipes chain state (`db`, `wal`, `priv_validator_state.json`). Prompts to stop and restart around the wipe; `yes=1` skips all prompts. Preserves signing keys (`tmkms-data/`, validator key) and node_id.          | Destructive on chain DB.                        |
 
 ### Build (rarely needed manually)
 
@@ -155,7 +171,7 @@ Sentinel's format is defined upstream. See [gno-watchtower → Sentinel config](
 | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `make status [watch=<sec>]` | Node status table (height, peers, validator VP, sync). `watch=N` refreshes every N seconds (requires jq — auto-installed under `.tools/bin/` if absent; falls back to raw JSON if install fails).                                                                                                                                                                                                                        |
 | `make infos`                | Validator identity, network config, build metadata, binary checksums.                                                                                                                                                                                                                                                                                                                                                    |
-| `make logs [since=<d>]`     | Merged TUI of gnoland + gnokms + sentinel logs via [gonzo](https://github.com/control-theory/gonzo). Per-service defaults: gnoland=1h, gnokms/sentinel=24h. `since=X` overrides all three. Each line is tagged `service.name` so the built-in Service column filters by origin. Auto-installed under `.tools/bin/` on first use; config lives at `.tools/gonzo.yml` (tracked). Press `?` inside the TUI for keybindings. |
+| `make logs [since=<d>]`     | Merged TUI of gnoland + sentinel logs (plus tmkms in local mode) via [gonzo](https://github.com/control-theory/gonzo). Per-service defaults: gnoland=1h, tmkms/sentinel=24h. `since=X` overrides them. Each line is tagged `service.name` so the built-in Service column filters by origin. Auto-installed under `.tools/bin/` on first use; config lives at `.tools/gonzo.yml` (tracked). Press `?` inside the TUI for keybindings. |
 
 ### Cleanup
 
@@ -167,7 +183,7 @@ Sentinel's format is defined upstream. See [gno-watchtower → Sentinel config](
 
 | Command             | What it does                                                    |
 | ------------------- | --------------------------------------------------------------- |
-| `make gen-identity` | Generate the validator signing identity in the gnokms keystore. |
+| `make gen-identity` | Generate/show the validator identity (and the tmkms softsign key in local mode). See [Signing](#signing). |
 | `make help`         | Show the target list.                                           |
 
 ### Change → command cheat sheet
@@ -190,24 +206,28 @@ Downloaded tools (gonzo, jq) live under `.tools/bin/` (gitignored, auto-fetched 
 ## Architecture
 
 - **gnoland** exposes RPC (`GNOLAND_RPC_PORT`, default `26657`) and P2P (`GNOLAND_P2P_PORT`, default `26656`) to the host. When `GNOLAND_NTP_UPDATE` is set (default), the container syncs its clock before launching gnoland, trying `ntpd`, then `rdate`, then an HTTPS `Date` header until one succeeds. The container has `CAP_SYS_TIME`, so on a Linux host this also updates the host's clock — disable `GNOLAND_NTP_UPDATE` if another NTP daemon already manages the host.
-- **gnokms** communicates with gnoland over a Unix socket — no network port is exposed.
+- **tmkms** (optional) signs votes/proposals for gnoland via the upstream Tendermint privval v0.34 protocol — **tmkms dials gnoland**, which listens. In local mode it runs as a bundled container reaching gnoland over a shared Unix socket (no network port). In remote mode it runs on a dedicated host and connects to gnoland's TCP listener (`TMKMS_LISTEN_PORT`, default `26659`).
 - **sentinel** collects gnoland RPC status, container logs, OTLP traces, and system resources, then forwards them to a central watchtower server. Image is pulled from `ghcr.io/aeddi/gno-watchtower/sentinel` (tag set via `SENTINEL_IMAGE_TAG`).
-- `gnoland-data/`, `gnokms-data/`, and `genesis.json` are gitignored — back them up.
+- `gnoland-data/`, `tmkms-data/`, and `genesis.json` are gitignored — back them up.
 
-## Password security
+## Signing
 
-The keystore is encrypted with `GNOKMS_PASSWORD`. In production, **do not store this password on disk** — including `validator.env`.
+The signer is selected in `config.overrides` via `consensus.priv_validator.tmkms_listener.listen_addr`. Set that key **last** (validation requires the other `tmkms_listener.*` fields first). See [`config.overrides.example`](config.overrides.example) and the upstream [tmkms quickstart](https://github.com/gnolang/gno/blob/master/docs/validators/tmkms-quickstart.md).
 
-If the password is written to `validator.env`, an attacker who dumps the disk (via snapshot, backup exfiltration, or physical access) gets both the encrypted keystore and the key to decrypt it. Keeping the password only in RAM means disk access alone is not enough.
+| Mode | `listen_addr` | tmkms runs | Consensus key | Use for |
+| --- | --- | --- | --- | --- |
+| **Local file signer** (default) | _(unset)_ | — | `gnoland-data/secrets/priv_validator_key.json` | Simplest; single-host, no KMS |
+| **Local tmkms** | `unix:///tmkms-sock/privval.sock` | bundled container (`make start`) | `tmkms-data/consensus.key` (softsign, on disk) | Dev/lab parity with the tmkms path |
+| **Remote tmkms** | `tcp://0.0.0.0:26659` | operator-run, dedicated host | on the tmkms host (HSM/softsign) | Production |
 
-**Recommended approach:** leave `GNOKMS_PASSWORD` unset and let `make start` / `make update` prompt you interactively at startup. The password is then held only in memory for the lifetime of the process.
+**Local tmkms.** `make gen-identity` creates the validator key and exports its softsign copy to `tmkms-data/consensus.key`. `make start` builds the tmkms image (Rust, several minutes on first run) and runs the container; tmkms dials gnoland's Unix socket. Softsign keeps the key on disk, so this is **dev/lab only** — for production use a remote tmkms with an HSM.
 
-**If you must inject the password non-interactively** (e.g. in a supervised init system), pass it as a runtime environment variable rather than persisting it to a file. Be aware that this still exposes the password in `/proc/<pid>/environ` and potentially in shell history — use a secrets manager or a systemd `EnvironmentFile` with `0600` permissions and consider whether the trade-off is acceptable for your threat model.
+**Remote tmkms.** `make gen-identity` prints the **node peer ID**; give it, the `chain_id`, and the `listen_addr` to the tmkms operator. They pin the peer ID in tmkms's `addr = "tcp://<peer-id>@<host>:26659"` and hand back their **tmkms identity pubkey**, which you put in `allowed_kms_pubkeys`. Register the validator's consensus pub_key (from the tmkms host) in `genesis.json`. Start tmkms first (it retries via `reconnect = true`); gnoland then waits up to 60 s for it to dial in. Firewall `TMKMS_LISTEN_PORT` to the signer's IP.
 
 ## Logging
 
 - gnoland: up to 3 GB by default (3 × 1 GB files, rotated), configurable via `GNOLAND_LOG_SIZE`
-- gnokms: up to 1 GB
+- tmkms (local mode only): up to 1 GB
 - sentinel: up to 100 MB
 
 ## Optional: Reverse Proxy
