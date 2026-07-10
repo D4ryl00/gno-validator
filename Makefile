@@ -48,7 +48,7 @@ PROJECT_ROOT := $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
 SCRIPT       := bash $(PROJECT_ROOT)/.Makefile.sh
 
 .PHONY: help gen-identity infos build start stop restart update reset \
-        logs status clean-imgs
+        logs status clean-imgs e2e
 
 help:
 	@awk '/^# Usage:/,/^$$/{sub(/^# ?/,""); print}' $(MAKEFILE_LIST)
@@ -85,7 +85,12 @@ clean-imgs:
 
 # Targets below are for CI and debugging — not part of the normal workflow,
 # intentionally omitted from `make help`. Invoke directly when you need to
-# force a rebuild.
+# force a rebuild or run the e2e signer test.
 
 build:
 	@$(SCRIPT) build
+
+# End-to-end test of the local bundled tmkms signer (builds images; ~10 min on
+# first run). Fully isolated from any live deployment. See test/README.md.
+e2e:
+	@bash $(PROJECT_ROOT)/test/e2e-tmkms-local.sh
