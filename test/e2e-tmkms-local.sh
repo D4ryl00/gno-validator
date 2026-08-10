@@ -93,7 +93,7 @@ command -v curl >/dev/null || { echo "curl required" >&2; exit 2; }
 # inside WORKDIR.
 log "Setting up isolated workdir"
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/gno-val-e2e.XXXXXX")"
-cp "$REPO_ROOT/Dockerfile" "$REPO_ROOT/docker-compose.yml" "$WORKDIR/"
+cp "$REPO_ROOT/Dockerfile" "$REPO_ROOT/docker-compose.yml" "$REPO_ROOT/.Makefile.sh" "$WORKDIR/"
 cp -R "$REPO_ROOT/docker" "$WORKDIR/docker"
 mkdir -p "$WORKDIR/gnoland-data" "$WORKDIR/tmkms-data" "$WORKDIR/tmkms-sock"
 
@@ -104,6 +104,19 @@ sed -i.bak \
   -e 's/image: gno-validator-tmkms/image: '"$TMKMS_IMAGE"'/' \
   "$WORKDIR/docker-compose.yml"
 rm -f "$WORKDIR/docker-compose.yml.bak"
+
+# Same isolation for the copied .Makefile.sh (used by step 7's reset check): it
+# resolves PROJECT_ROOT from its own location, so data dirs land in WORKDIR, but
+# its container names are hardcoded to the default project and would otherwise
+# inspect a real deployment's containers.
+sed -i.bak \
+  -e 's/^GNOLAND_CONTAINER=.*/GNOLAND_CONTAINER="'"$PROJECT"'-gnoland-1"/' \
+  -e 's/^TMKMS_CONTAINER=.*/TMKMS_CONTAINER="'"$PROJECT"'-tmkms-1"/' \
+  -e 's/^SENTINEL_CONTAINER=.*/SENTINEL_CONTAINER="'"$PROJECT"'-sentinel-1"/' \
+  -e 's/^GNOLAND_IMAGE=.*/GNOLAND_IMAGE="'"$GNOLAND_IMAGE"'"/' \
+  -e 's/^TMKMS_IMAGE=.*/TMKMS_IMAGE="'"$TMKMS_IMAGE"'"/' \
+  "$WORKDIR/.Makefile.sh"
+rm -f "$WORKDIR/.Makefile.sh.bak"
 
 cat >"$WORKDIR/validator.env" <<EOF
 GNO_REPO=${GNO_REPO}
@@ -219,6 +232,55 @@ echo "  OK: validator voting power = ${vp}"
 height="$(rpc_height || true)"
 network="$(rpc_network || true)"
 [[ "$network" == "$CHAIN_ID" ]] || fail "chain id mismatch: RPC network='${network}' expected '${CHAIN_ID}'"
+
+# --- 7. Reset round-trip ----------------------------------------------------
+# 'make reset' must clear tmkms's double-sign state along with the chain state,
+# or tmkms refuses to sign until the chain climbs back past its last height.
+# Runs the real cmd_reset against the isolated workdir copy of .Makefile.sh.
+log "Verifying 'make reset' clears tmkms double-sign state"
+TM_STATE="$WORKDIR/tmkms-data/consensus_state.json"
+PV_STATE="$WORKDIR/gnoland-data/secrets/priv_validator_state.json"
+
+[[ -f "$TM_STATE" ]] || fail "tmkms wrote no consensus_state.json — nothing to reset"
+tm_height_before="$(awk -F'"' '/"height"/{print $4; exit}' "$TM_STATE" 2>/dev/null || true)"
+[[ -n "$tm_height_before" && "$tm_height_before" -gt 0 ]] ||
+  fail "tmkms double-sign state is not above height 0 (got '${tm_height_before:-empty}')"
+echo "  OK: tmkms double-sign state at height ${tm_height_before}"
+
+# Stop first so reset sees was_running=0 and skips its stop/start prompts —
+# restarting is done below with the e2e's own compose invocation, since cmd_start
+# would go through the build-state machinery this test deliberately bypasses.
+compose stop gnoland tmkms >/dev/null 2>&1 || true
+( cd "$WORKDIR" && YES=1 bash .Makefile.sh reset ) || fail "'reset' exited non-zero"
+
+[[ ! -e "$WORKDIR/gnoland-data/db" ]] || fail "reset left gnoland-data/db behind"
+[[ ! -e "$WORKDIR/gnoland-data/wal" ]] || fail "reset left gnoland-data/wal behind"
+[[ ! -e "$TM_STATE" ]] || fail "reset left tmkms-data/consensus_state.json behind"
+[[ -s "$WORKDIR/tmkms-data/consensus.key" ]] || fail "reset destroyed tmkms-data/consensus.key"
+pv_height_after="$(awk -F'"' '/"height"/{print $4; exit}' "$PV_STATE" 2>/dev/null || true)"
+[[ "$pv_height_after" == "0" ]] || fail "priv_validator_state.json not at height 0 (got '${pv_height_after:-empty}')"
+echo "  OK: chain state + tmkms state cleared, consensus key kept"
+
+# tmkms must recreate the state file on its own and sign from a clean slate —
+# the assumption behind deleting it rather than rewriting it to height 0.
+log "Restarting after reset"
+compose up -d gnoland tmkms
+# Assert on the recreated state file rather than the logs: `compose stop` + `up`
+# reuses the containers, so their pre-reset logs are still there and a
+# "signed Precommit" grep would match the old run. A state file that reappears
+# and climbs is proof tmkms recreated it and is signing now.
+tm_state_ge2() {
+  local h
+  [[ -f "$TM_STATE" ]] || return 1
+  h="$(awk -F'"' '/"height"/{print $4; exit}' "$TM_STATE" 2>/dev/null || true)"
+  [[ -n "$h" && "$h" -ge 2 ]]
+}
+wait_for "tmkms recreates its state file and signs past height 2" 120 tm_state_ge2
+wait_for "RPC reports block height >= 2 after reset" 120 rpc_height_ge2
+echo "  OK: tmkms recreated its state file and resumed signing"
+
+height="$(rpc_height || true)"
+vp="$(rpc_vp || true)"
 
 log "PASS — local bundled tmkms signed consensus for the validator"
 echo "  chain_id: ${network}   height: ${height}   voting_power: ${vp}"

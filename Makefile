@@ -6,7 +6,8 @@
 #   start                            Start services (first run: builds images if needed)
 #   stop                             Stop services without removing containers
 #   restart                          Stop then start (re-applies config.overrides, no password prompt)
-#   reset                            Wipe chain state (db, wal, priv_validator_state.json).
+#   reset          [yes=1]           Wipe chain state (db, wal, priv_validator_state.json, and in
+#                                    local tmkms mode tmkms-data/consensus_state.json). Keeps signing keys.
 #   update         [force=1]         Rebuild images and/or recreate containers if anything
 #                                    has changed since the last build/start. force=1 does it anyway.
 #                                    Recreate loses container logs but preserves chain data + signing keys.

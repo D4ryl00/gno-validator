@@ -1737,10 +1737,21 @@ cmd_reset() {
   local pv_state="${GNOLAND_DATA}/secrets/priv_validator_state.json"
   local pv_height=""
   [[ -f "$pv_state" ]] && pv_height="$(awk -F'"' '/"height"/{print $4; exit}' "$pv_state" 2>/dev/null || true)"
-  # Initialized but no chain state yet (fresh init, node never started) and
-  # priv_validator_state already at height=0 → nothing to do.
+
+  # tmkms keeps its own double-sign state, which is chain state too: leaving it
+  # behind after a wipe makes tmkms refuse to sign until the chain climbs back
+  # past its last height. Only reachable in local (unix://) mode — a remote
+  # signer's state lives on the signer host.
+  local tmkms_md
+  tmkms_md="$(tmkms_mode)"
+  local tm_state=""
+  [[ "$tmkms_md" == "local" ]] && tm_state="${TMKMS_DATA}/consensus_state.json"
+
+  # Initialized but no chain state yet (fresh init, node never started),
+  # priv_validator_state already at height=0, and no tmkms state left over
+  # → nothing to do.
   if [[ ! -d "${GNOLAND_DATA}/db" && ! -d "${GNOLAND_DATA}/wal" ]]; then
-    if [[ ! -f "$pv_state" || "$pv_height" == "0" ]]; then
+    if [[ ! -f "$pv_state" || "$pv_height" == "0" ]] && [[ -z "$tm_state" || ! -f "$tm_state" ]]; then
       echo "Already at clean state — nothing to reset."
       return 0
     fi
@@ -1756,7 +1767,12 @@ cmd_reset() {
   echo "About to reset chain state."
   echo "  Will delete: ${GNOLAND_DATA}/db, ${GNOLAND_DATA}/wal"
   echo "  Will reset : ${pv_state}"
-  echo "  Will keep  : ${TMKMS_DATA}/ (tmkms consensus key + state), validator keys, node_id, config"
+  if [[ -n "$tm_state" ]]; then
+    echo "             : ${tm_state}  (tmkms double-sign state)"
+    echo "  Will keep  : ${TMKMS_DATA}/consensus.key, validator keys, node_id, config"
+  else
+    echo "  Will keep  : ${TMKMS_DATA}/ (tmkms consensus key + state), validator keys, node_id, config"
+  fi
 
   # yes=1 skips every interactive prompt in this flow (Continue, Stop-first,
   # Start-again). Defaults when skipped: proceed, stop-then-reset, start-again.
@@ -1785,7 +1801,24 @@ cmd_reset() {
     echo "         The node will refuse to start until this file contains height=0. Manual fix needed." >&2
     return 1
   fi
+  # Deleted rather than rewritten to height=0: tmkms creates this file itself on
+  # first start (gen-identity only writes consensus.key), so "absent" is the
+  # state a fresh install already runs from, and hand-writing tmkms's JSON would
+  # risk a schema mismatch that crash-loops the signer. The asymmetry with
+  # priv_validator_state.json above is deliberate — gnoland won't start without
+  # that one, so it has to exist at height=0.
+  if [[ -n "$tm_state" ]] && ! rm -f "$tm_state"; then
+    echo "WARNING: chain state reset but ${tm_state} could not be removed." >&2
+    echo "         tmkms will refuse to sign until the chain passes its last recorded height." >&2
+    echo "         Delete the file manually before starting." >&2
+    return 1
+  fi
   echo "Reset complete."
+  if [[ "$tmkms_md" == "remote" ]]; then
+    echo "Note: this node uses a remote tmkms signer. Its double-sign state lives on the"
+    echo "      signer host and was NOT reset — tmkms will refuse to sign until the chain"
+    echo "      passes its last recorded height. Reset it there if you restarted from genesis."
+  fi
 
   if ((was_running == 1)); then
     if ((skip_prompt == 1)) || confirm "Start containers again?" y yes=1; then

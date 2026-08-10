@@ -157,7 +157,7 @@ Sentinel's format is defined upstream. See [gno-watchtower → Sentinel config](
 | `make stop`             | Stops services but keeps containers (no recreate). Idempotent.                                                                                                                                  | Free.                                           |
 | `make restart`          | `stop` + `start`. Re-applies `config.overrides` on the way up.                                                                                                                                  | Free.                                           |
 | `make update [force=1]` | Rebuilds images if build inputs changed, pulls sentinel on digest drift, recreates containers if `validator.env` / `docker-compose.yml` changed. `force=1` does everything unconditionally.     | Rebuild minutes; recreate wipes container logs. |
-| `make reset [yes=1]`    | Wipes chain state (`db`, `wal`, `priv_validator_state.json`). Prompts to stop and restart around the wipe; `yes=1` skips all prompts. Preserves signing keys (`tmkms-data/`, validator key) and node_id.          | Destructive on chain DB.                        |
+| `make reset [yes=1]`    | Wipes chain state (`db`, `wal`, `priv_validator_state.json`, and in local tmkms mode `tmkms-data/consensus_state.json`). Prompts to stop and restart around the wipe; `yes=1` skips all prompts. Preserves signing keys (`tmkms-data/consensus.key`, validator key) and node_id. With a *remote* tmkms, its double-sign state lives on the signer host and must be reset there. | Destructive on chain DB; clears double-sign protection. |
 
 ### Build (rarely needed manually)
 
