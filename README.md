@@ -17,9 +17,59 @@ A `sentinel` sidecar ships node metrics, logs, and OTLP traces to an external [g
 - Docker and Docker Compose v2
 - make
 
+---
+
+## Choose a signing setup first
+
+Everything else is the same in all three; only the signer differs. Decide this
+before step 2, because `config.overrides` and the setup sequence depend on it.
+
+| | **Local file signer** | **Local tmkms** | **Remote signer** |
+| --- | --- | --- | --- |
+| Consensus key lives | on this host, on disk | on this host, on disk | on the signer host(s) |
+| Hosts needed | 1 | 1 | 2+ (this node + signer) |
+| Extra containers | — | `tmkms` (bundled) | none here |
+| Key can be stolen from this host | yes | yes | no |
+| Survives losing one machine | no | no | with horcrux, yes |
+| `listen_addr` | _(unset)_ | `unix://…` | `tcp://…` |
+| Setup | steps 1-7 as written | steps 1-7 as written | [runbook](#remote-signer-runbook) |
+| Use for | testnets, throwaway nodes | dev/lab rehearsal of the tmkms path | **mainnet, real stake** |
+
+**Which one:** use the **local file signer** unless the stake matters — it is the
+simplest thing that works. Use **local tmkms** only to rehearse the tmkms path on
+one machine; its softsign key sits on disk, so it buys no security over the file
+signer. For anything with real slashing risk use a **remote signer**, and pick:
+
+- **tmkms + HSM** — one signer host, key in hardware. Simpler. A dead signer host
+  stops your validator.
+- **horcrux** — key split across N hosts (typically 3, 2-of-3), no single host can
+  sign alone and losing one host does not stop signing. More moving parts.
+
+### Host topology
+
+```
+Local file signer / local tmkms          Remote signer (horcrux, 2-of-3)
+
+┌─────────── host A ───────────┐         ┌────── host A ──────┐
+│  gnoland + sentinel          │         │ gnoland + sentinel │   <- this repo
+│  (+ tmkms container in       │         │ :26659 privval     │
+│   local tmkms mode)          │         └─────────┬──────────┘
+└──────────────────────────────┘                   │ cosigners dial in
+                                          ┌────────┼────────┐
+                                     ┌────┴───┐┌───┴────┐┌───┴────┐
+                                     │ host B ││ host C ││ host D │
+                                     │horcrux1││horcrux2││horcrux3│  <- ~/horcrux
+                                     └────────┘└────────┘└────────┘
+                                       └── cosigners talk to each other :2222
+```
+
+This repo runs on **host A only**. The signer hosts are provisioned separately —
+this repo does not deploy them. In remote mode `make start` brings up gnoland and
+sentinel and opens the privval port; the signer connects inward.
+
 ## Setup
 
-Seven-step quick start. Each step links to the matching detailed section below when one exists.
+Seven-step quick start for the **local file signer** and **local tmkms** setups. Each step links to the matching detailed section below when one exists. For a **remote signer**, steps 2 and 4 are replaced by the [Remote signer runbook](#remote-signer-runbook).
 
 ### 1. `validator.env`
 
@@ -32,7 +82,9 @@ $EDITOR validator.env
 
 ### 2. `config.overrides`
 
-Per-node gnoland config (moniker, peers, telemetry labels). Copy the example and fill the required fields. See [config.overrides reference](#configoverrides-reference).
+Per-node gnoland config (moniker, peers, telemetry labels) **and the signer**. Copy the example and fill the required fields. See [config.overrides reference](#configoverrides-reference).
+
+If you picked a **remote signer** in [Choose a signing setup](#choose-a-signing-setup-first), stop here and follow the [Remote signer runbook](#remote-signer-runbook) instead — it replaces this step and step 4.
 
 ```sh
 cp config.overrides.example config.overrides
@@ -231,18 +283,19 @@ and `horcrux` (threshold signing across several hosts).
 
 **Local tmkms.** `make gen-identity` creates the validator key and exports its softsign copy to `tmkms-data/consensus.key`. `make start` builds the tmkms image (Rust, several minutes on first run) and runs the container; tmkms dials gnoland's Unix socket. Softsign keeps the key on disk, so this is **dev/lab only** — for production use a remote signer.
 
-**Remote signer, common setup.** In this mode nothing signs on this host, so you can run everything here *except* the signer: `make start` brings up gnoland and sentinel and opens the privval listener, and the signer connects from wherever it runs. `make gen-identity` generates no signing key; it prints the `chain_id`, the `listen_addr`, and this node's identity in the two encodings signers pin:
+**Remote signer.** Nothing signs on this host: `make start` brings up gnoland and
+sentinel and opens the privval listener, and the signer connects inward from
+wherever it runs. Setup is two-sided and order-dependent — follow the
+[Remote signer runbook](#remote-signer-runbook), which covers the whole sequence
+step by step. The two subsections below cover what differs per signer.
 
-| Printed value | Pinned by | Where |
-| --- | --- | --- |
-| node peer ID | tmkms | `addr = "tcp://<peer-id>@<host>:26659"` |
-| node conn pubkey (64 hex) | horcrux | `chainNodes[].connPubKey` |
+### Remote signer: tmkms
 
-In return you get the signer's identity pubkey(s), which go in `allowed_kms_pubkeys` — **one entry per tmkms instance, or one per horcrux cosigner**, comma-separated. gnoland rejects an empty allowlist on a `tcp://` listener, since it is the only authorization control there. Register the validator's consensus pub_key (from the signer host) in `genesis.json`, start the signer **before** the node — gnoland waits only 60 s (`wait_for_connection_timeout`) for it to dial in — and firewall `SIGNER_LISTEN_PORT` to the signer hosts' IPs.
+Pin this node's **peer ID** in tmkms's `addr`, and put tmkms's identity pubkey in `allowed_kms_pubkeys`. tmkms retries via `reconnect = true`, so it can be started first and left to dial.
 
-**Remote signer: tmkms.** Pin this node's **peer ID** in tmkms's `addr`, and put tmkms's identity pubkey in `allowed_kms_pubkeys`. tmkms retries via `reconnect = true`, so it can be started first and left to dial.
+### Remote signer: horcrux (threshold signing)
 
-**Remote signer: horcrux (threshold signing).** [horcrux](https://github.com/aeddi/horcrux) splits the consensus key into shards held by separate cosigners, so no single host can sign alone. Use the `aeddi/horcrux` fork — it carries the tm2 compatibility fixes vanilla horcrux lacks (a spec-compliant sign response, which tm2 validates strictly, and leader-only chain-node connections). Three requirements are specific to gnoland and easy to get wrong:
+[horcrux](https://github.com/aeddi/horcrux) splits the consensus key into shards held by separate cosigners, so no single host can sign alone. Use the `aeddi/horcrux` fork — it carries the tm2 compatibility fixes vanilla horcrux lacks (a spec-compliant sign response, which tm2 validates strictly, and leader-only chain-node connections). Three requirements are specific to gnoland and easy to get wrong:
 
 1. **`connKeyFile` is mandatory**, though upstream horcrux docs present it as optional. Without a persistent connection identity each cosigner dials with a freshly generated key, which can never match the allowlist gnoland requires on `tcp://`. Run `horcrux create-conn-key` on **each** cosigner and put **all** of their pubkeys in `allowed_kms_pubkeys` — leadership rotates, so any of them may hold the connection.
 2. **`leaderOnlyChainNodeConnections: true`** under `thresholdMode`. gnoland holds exactly one signer slot with a 3 s accept window. With every cosigner dialing, the connection churns about once a second and the validator signs **nothing**. Leader-only dialing gives the node one stable connection and hands it over on a leadership change.
@@ -268,6 +321,88 @@ chainNodes:
 ```
 
 See [horcrux's authentication docs](https://github.com/aeddi/horcrux/blob/main/docs/authentication.md) for cosigner-to-cosigner mutual TLS and the full pinning matrix. `test/e2e-horcrux.sh` runs this whole topology end to end (see [`test/README.md`](test/README.md)).
+
+### Remote signer runbook
+
+Setup is two-sided and order-dependent: each side needs an identity the other
+produces. Steps marked **[node]** run here, **[signer]** run on the signer
+host(s). This replaces steps 2 and 4 of the quick start; steps 1, 3, 5, 6, 7 are
+unchanged.
+
+**1. [node] Select remote mode with a placeholder allowlist.**
+
+`make gen-identity` only prints the node's identity for a *remote* signer once
+`config.overrides` already selects `tcp://` — but gnoland refuses an empty
+`allowed_kms_pubkeys` on a `tcp://` listener, and you do not have the real
+pubkeys yet. So start with a placeholder and replace it in step 4:
+
+```
+consensus.priv_validator.tmkms_listener.chain_id            = "<chain-id>"
+consensus.priv_validator.tmkms_listener.protocol_version    = "v0.34"
+consensus.priv_validator.tmkms_listener.allowed_kms_pubkeys = "0000000000000000000000000000000000000000000000000000000000000000"
+consensus.priv_validator.tmkms_listener.listen_addr         = "tcp://0.0.0.0:26659"
+```
+
+Set `listen_addr` **last** — validation requires the other fields first. Also set
+`SIGNER_LISTEN_PORT` in `validator.env` and firewall it to the signer hosts only.
+
+**2. [node] Print the node identity.**
+
+```sh
+make gen-identity
+```
+
+No signing key is generated. Give the signer operator the `chain_id`, the
+`listen_addr`, and whichever identity encoding their signer pins:
+
+| Printed value | Pinned by | Where |
+| --- | --- | --- |
+| node peer ID | tmkms | `addr = "tcp://<peer-id>@<host>:26659"` |
+| node conn pubkey (64 hex) | horcrux | `chainNodes[].connPubKey` |
+
+**3. [signer] Create the signer identities and get the consensus key in place.**
+
+*tmkms:* provision the consensus key in your HSM (or softsign), and give back the
+tmkms identity pubkey.
+
+*horcrux:* on **each** cosigner, `horcrux create-conn-key`, and give back all
+three printed pubkeys. Shard the consensus key once
+(`create-ed25519-shards --chain-id <chain-id> --threshold 2 --shards 3`, plus
+`create-ecies-shards --shards 3`) and distribute one shard set per cosigner.
+`connKeyFile` is **not optional here** — see [horcrux notes](#remote-signer-horcrux-threshold-signing).
+
+**4. [node] Replace the placeholder with the real allowlist.**
+
+Every signer identity, comma-separated — one per tmkms instance, or **one per
+horcrux cosigner** (leadership rotates, so any of them may hold the connection):
+
+```
+consensus.priv_validator.tmkms_listener.allowed_kms_pubkeys = "<pubkey1>,<pubkey2>,<pubkey3>"
+```
+
+**5. [node] Register the validator pub_key in `genesis.json`.**
+
+The consensus pub_key comes from the *signer* host — this node never had the key.
+
+**6. [signer] Start the signer, then [node] `make start`.**
+
+Order matters: gnoland waits only 60 s (`wait_for_connection_timeout`) for a
+signer to dial in, then fails to start. tmkms retries on its own
+(`reconnect = true`); a horcrux cluster needs all cosigners up and a leader
+elected.
+
+**7. [node] Verify.**
+
+```sh
+make status
+```
+
+Voting power `>= 1` and a climbing height mean the remote signer is signing. If
+the node reports `This node is a validator` but height does not move, the signer
+is connected but not signing — check the signer's own logs.
+
+> `test/e2e-horcrux.sh` performs this entire sequence automatically against a
+> throwaway 2-of-3 cluster. Read it if you want a worked example of every step.
 
 ## Logging
 
