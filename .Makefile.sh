@@ -891,7 +891,14 @@ ensure_images() {
 
   if ((missing == 1)); then
     echo "Building required images..."
-    cmd_build
+    # cmd_build returns RC_UNCHANGED when inputs already match; for
+    # ensure_images that still satisfies "images exist afterwards", so it is
+    # not an error and must not abort under set -e.
+    local build_rc=0
+    cmd_build || build_rc=$?
+    if ((build_rc != RC_OK && build_rc != RC_UNCHANGED)); then
+      return "$build_rc"
+    fi
     echo ""
     return 0
   fi
@@ -904,7 +911,11 @@ ensure_images() {
     return 0
     ;;
   rebuild-if-drift)
-    FORCE=1 cmd_build
+    local drift_rc=0
+    FORCE=1 cmd_build || drift_rc=$?
+    if ((drift_rc != RC_OK && drift_rc != RC_UNCHANGED)); then
+      return "$drift_rc"
+    fi
     return 0
     ;;
   *)
@@ -1402,7 +1413,7 @@ cmd_build() {
         docker image inspect "${PREV_GNOLAND_IMAGE_TAG:-}" >/dev/null 2>&1; then
         echo "Nothing to rebuild — .build-state and images match current inputs."
         echo "  (pass force=1 to rebuild anyway)"
-        return 0
+        return "$RC_UNCHANGED"
       fi
     fi
   else
