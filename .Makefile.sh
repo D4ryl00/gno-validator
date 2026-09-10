@@ -1496,11 +1496,11 @@ cmd_stop() {
   case "$STATE_OVERALL" in
   none)
     echo "No validator containers exist — nothing to stop."
-    return 0
+    return "$RC_UNCHANGED"
     ;;
   stopped)
     echo "Containers already stopped."
-    return 0
+    return "$RC_UNCHANGED"
     ;;
   esac
 
@@ -1542,7 +1542,14 @@ cmd_restart() {
   if [[ "$STATE_OVERALL" == "stopped" ]]; then
     echo "Containers already stopped; starting them."
   else
-    cmd_stop
+    # cmd_stop may return RC_UNCHANGED, which set -e would treat as fatal in
+    # plain statement position. Capture it: for restart, "nothing to stop" is
+    # not an error and not a reason to skip the start.
+    local stop_rc=0
+    cmd_stop || stop_rc=$?
+    if ((stop_rc != RC_OK && stop_rc != RC_UNCHANGED)); then
+      return "$stop_rc"
+    fi
     echo ""
   fi
   cmd_start

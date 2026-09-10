@@ -80,5 +80,50 @@ cmd_start >/dev/null 2>&1
 assert_rc 0 $? "start with no containers reports changed"
 
 echo ""
+echo "== stop =="
+
+classify_state() { STATE_OVERALL="none"; }
+cmd_stop >/dev/null 2>&1
+assert_rc 3 $? "stop with no containers reports unchanged"
+
+classify_state() { STATE_OVERALL="stopped"; }
+cmd_stop >/dev/null 2>&1
+assert_rc 3 $? "stop on an already-stopped stack reports unchanged"
+
+classify_state() {
+  STATE_OVERALL="running"
+  STATE_GNOLAND="running"
+  STATE_TMKMS="absent"
+  STATE_SENTINEL="running"
+}
+cmd_stop >/dev/null 2>&1
+assert_rc 0 $? "stop on a running stack reports changed"
+
+echo ""
+echo "== restart =="
+
+classify_state() { STATE_OVERALL="none"; }
+cmd_restart >/dev/null 2>&1
+assert_rc 1 $? "restart with no containers is an error"
+
+# A running stack: cmd_restart calls cmd_stop (rc 0) then cmd_start. Re-stub
+# classify_state to report 'stopped' on the second call so cmd_start takes the
+# start path, exactly as it would in reality.
+_CLASSIFY_CALLS=0
+classify_state() {
+  _CLASSIFY_CALLS=$((_CLASSIFY_CALLS + 1))
+  if ((_CLASSIFY_CALLS >= 3)); then
+    STATE_OVERALL="stopped"
+  else
+    STATE_OVERALL="running"
+  fi
+  STATE_GNOLAND="running"
+  STATE_TMKMS="absent"
+  STATE_SENTINEL="running"
+}
+cmd_restart >/dev/null 2>&1
+assert_rc 0 $? "restart on a running stack reports changed"
+
+echo ""
 printf 'passed: %d  failed: %d\n' "$PASS" "$FAIL"
 ((FAIL == 0))
