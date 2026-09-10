@@ -44,7 +44,7 @@ GNOLAND_CONTAINER="gno-validator-gnoland-1"
 TMKMS_CONTAINER="gno-validator-tmkms-1"
 SENTINEL_CONTAINER="gno-validator-sentinel-1"
 
-# Compose profile args, populated by resolve_tmkms: (--profile tmkms-local) when
+# Compose profile args, populated by resolve_signer_mode: (--profile tmkms-local) when
 # config.overrides selects a unix:// tmkms listener, empty otherwise. Every
 # _compose / _compose_noenv call includes it so the bundled tmkms service is
 # created/stopped/logged only in local mode.
@@ -121,14 +121,17 @@ _compose_noenv() {
   docker compose "${_COMPOSE_PROFILES[@]+"${_COMPOSE_PROFILES[@]}"}" "$@"
 }
 
-# ---- tmkms mode resolution
+# ---- signer mode resolution
 # The signer is selected entirely in config.overrides via the
-# consensus.priv_validator.tmkms_listener.listen_addr scheme:
+# consensus.priv_validator.tmkms_listener.listen_addr scheme. That config key
+# keeps its upstream gnoland name, but the listener speaks the generic
+# Tendermint privval protocol, so a remote signer may be tmkms or horcrux:
 #   unix://…  → local  (bundled tmkms container, softsign)
-#   tcp://…   → remote (external tmkms on another host; no local container)
+#   tcp://…   → remote (external signer on another host — tmkms or horcrux;
+#                       no local container)
 #   empty/absent → off (gnoland's local file signer)
-# resolve_tmkms sets TMKMS_MODE, the _COMPOSE_PROFILES array, and (in local
-# mode) exports TMKMS_CHAIN_ID for the tmkms container. Call it before any
+# resolve_signer_mode sets SIGNER_MODE, the _COMPOSE_PROFILES array, and (in
+# local mode) exports TMKMS_CHAIN_ID for the tmkms container. Call it before any
 # compose invocation.
 
 # Print the trimmed value of KEY from config.overrides (empty if unset or the
@@ -152,7 +155,7 @@ _override_value() {
   done <"$OVERRIDES_FILE"
 }
 
-tmkms_mode() {
+signer_mode() {
   local val
   val="$(_override_value consensus.priv_validator.tmkms_listener.listen_addr)"
   case "$val" in
@@ -175,11 +178,11 @@ tmkms_chain_id() {
   env_get TMKMS_CHAIN_ID
 }
 
-resolve_tmkms() {
-  TMKMS_MODE="$(tmkms_mode)"
-  export TMKMS_MODE
+resolve_signer_mode() {
+  SIGNER_MODE="$(signer_mode)"
+  export SIGNER_MODE
   _COMPOSE_PROFILES=()
-  if [[ "$TMKMS_MODE" == "local" ]]; then
+  if [[ "$SIGNER_MODE" == "local" ]]; then
     _COMPOSE_PROFILES=(--profile tmkms-local)
     export TMKMS_CHAIN_ID="$(tmkms_chain_id)"
   fi
@@ -236,7 +239,7 @@ check_genesis() {
 }
 
 # True if a bundled-tmkms consensus key is present. Only meaningful in local
-# (unix://) mode; callers gate on tmkms_mode before requiring it.
+# (unix://) mode; callers gate on signer_mode before requiring it.
 check_consensus_key() {
   [[ -f "${TMKMS_DATA}/consensus.key" ]]
 }
@@ -275,7 +278,7 @@ preflight() {
     tmkms_key)
       # Only required in local (unix://) tmkms mode. In off/remote mode the
       # signing key lives elsewhere (local file signer / remote signer host).
-      if [[ "$(tmkms_mode)" == "local" ]]; then
+      if [[ "$(signer_mode)" == "local" ]]; then
         check_consensus_key || {
           err_consensus_key_missing
           return 1
@@ -639,7 +642,7 @@ build_state_drift_summary() {
   curr_tmkms="$(content_hash_for tmkms)"
   curr_gnoland="$(content_hash_for gnoland)"
   # tmkms image is only built in local mode; only flag its content drift there.
-  if [[ "$(tmkms_mode)" == "local" && "${PREV_TMKMS_CONTENT_HASH:-}" != "${curr_tmkms}" ]]; then
+  if [[ "$(signer_mode)" == "local" && "${PREV_TMKMS_CONTENT_HASH:-}" != "${curr_tmkms}" ]]; then
     echo "  tmkms image content changed (Dockerfile or docker/tmkms-entrypoint.sh)"
     drift=1
   fi
@@ -871,7 +874,7 @@ ensure_images() {
   local missing=0
   docker image inspect "$GNOLAND_IMAGE" >/dev/null 2>&1 || missing=1
   # The tmkms image is only needed (and only built) in local mode.
-  if [[ "$(tmkms_mode)" == "local" ]]; then
+  if [[ "$(signer_mode)" == "local" ]]; then
     docker image inspect "$TMKMS_IMAGE" >/dev/null 2>&1 || missing=1
   fi
 
@@ -1074,7 +1077,7 @@ _fresh_up() {
   # running non-root, from creating the listener socket in local mode).
   mkdir -p tmkms-sock
   # tmkms-data holds the softsign key + state, mounted only by the tmkms service.
-  [[ "${TMKMS_MODE:-off}" == "local" ]] && mkdir -p "$TMKMS_DATA"
+  [[ "${SIGNER_MODE:-off}" == "local" ]] && mkdir -p "$TMKMS_DATA"
 
   _compose up -d
 
@@ -1151,12 +1154,12 @@ _print_validator_identity() {
 
 cmd_gen_identity() {
   preflight docker env_note
-  resolve_tmkms
+  resolve_signer_mode
   ensure_images build-if-missing
   drift_analyze
   drift_warn
 
-  case "$TMKMS_MODE" in
+  case "$SIGNER_MODE" in
   off)
     # Local file signer: gnoland holds and uses priv_validator_key.json.
     echo "Signer mode: local file signer (no external signer configured)."
@@ -1299,13 +1302,13 @@ cmd_infos() {
   fi
 
   echo "=== Identity ==="
-  local signer_mode
-  case "$(tmkms_mode)" in
-  local) signer_mode="local bundled tmkms (softsign)" ;;
-  remote) signer_mode="remote signer, external host (tmkms or horcrux)" ;;
-  *) signer_mode="local file signer" ;;
+  local signer_label
+  case "$(signer_mode)" in
+  local) signer_label="local bundled tmkms (softsign)" ;;
+  remote) signer_label="remote signer, external host (tmkms or horcrux)" ;;
+  *) signer_label="local file signer" ;;
   esac
-  printf '%-18s %s\n' "signer:" "$signer_mode"
+  printf '%-18s %s\n' "signer:" "$signer_label"
   local node_reason="gnoland throwaway run failed — check 'make logs'"
   # Validator identity comes from priv_validator_key.json (local file signer or
   # the softsign key exported to tmkms). In remote mode the consensus key lives
@@ -1345,13 +1348,13 @@ cmd_infos() {
 
 cmd_build() {
   preflight docker env_note
-  resolve_tmkms
+  resolve_signer_mode
   resolve_gno_inputs
 
   # The tmkms image is only built in local mode (the Rust build is heavy; off /
   # remote operators never use it). build_tmkms gates every tmkms build step.
   local build_tmkms=0
-  [[ "$TMKMS_MODE" == "local" ]] && build_tmkms=1
+  [[ "$SIGNER_MODE" == "local" ]] && build_tmkms=1
 
   local repo="$GNO_REPO" version="$GNO_VERSION" commit="$GNO_COMMIT_HASH"
   BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -1443,7 +1446,7 @@ cmd_build() {
 
 cmd_start() {
   preflight docker env_note genesis tmkms_key
-  resolve_tmkms
+  resolve_signer_mode
   classify_state
   resolve_input_hashes
 
@@ -1477,7 +1480,7 @@ cmd_start() {
 
 cmd_stop() {
   preflight docker
-  resolve_tmkms
+  resolve_signer_mode
   classify_state
   case "$STATE_OVERALL" in
   none)
@@ -1519,7 +1522,7 @@ cmd_stop() {
 
 cmd_restart() {
   preflight docker env_note genesis tmkms_key
-  resolve_tmkms
+  resolve_signer_mode
   classify_state
   if [[ "$STATE_OVERALL" == "none" ]]; then
     err_no_containers_for_restart
@@ -1536,7 +1539,7 @@ cmd_restart() {
 
 cmd_logs() {
   preflight docker
-  resolve_tmkms
+  resolve_signer_mode
   classify_state
   if [[ "$STATE_OVERALL" == "none" ]]; then
     echo "No containers — run 'make start'."
@@ -1614,7 +1617,7 @@ cmd_logs() {
     "$jq_bin" -cRM --unbuffered --arg s gnoland "$tag_program" >"$_LOGS_FIFO") &
   _LOGS_FEED_PIDS="$! $_LOGS_FEED_PIDS"
   # tmkms only runs in local mode; skip its feeder otherwise (no such container).
-  if [[ "$TMKMS_MODE" == "local" ]]; then
+  if [[ "$SIGNER_MODE" == "local" ]]; then
     (_compose_noenv logs --no-log-prefix -f --since "$since_tmkms" tmkms 2>/dev/null |
       "$jq_bin" -cRM --unbuffered --arg s tmkms "$tag_program" >"$_LOGS_FIFO") &
     _LOGS_FEED_PIDS="$! $_LOGS_FEED_PIDS"
@@ -1797,10 +1800,10 @@ cmd_reset() {
   # behind after a wipe makes tmkms refuse to sign until the chain climbs back
   # past its last height. Only reachable in local (unix://) mode — a remote
   # signer's state lives on the signer host.
-  local tmkms_md
-  tmkms_md="$(tmkms_mode)"
+  local signer_md
+  signer_md="$(signer_mode)"
   local tm_state=""
-  [[ "$tmkms_md" == "local" ]] && tm_state="${TMKMS_DATA}/consensus_state.json"
+  [[ "$signer_md" == "local" ]] && tm_state="${TMKMS_DATA}/consensus_state.json"
 
   # Initialized but no chain state yet (fresh init, node never started),
   # priv_validator_state already at height=0, and no tmkms state left over
@@ -1869,7 +1872,7 @@ cmd_reset() {
     return 1
   fi
   echo "Reset complete."
-  if [[ "$tmkms_md" == "remote" ]]; then
+  if [[ "$signer_md" == "remote" ]]; then
     echo "Note: this node uses a remote signer. Its double-sign state lives on the signer"
     echo "      host and was NOT reset — the signer will refuse to sign until the chain"
     echo "      passes its last recorded height. Reset it there if you restarted from genesis:"
@@ -2028,7 +2031,7 @@ cmd_clean_imgs() {
 
 cmd_update() {
   preflight docker env_note genesis tmkms_key
-  resolve_tmkms
+  resolve_signer_mode
   local force="${FORCE:-0}"
   resolve_gno_inputs
   classify_state
