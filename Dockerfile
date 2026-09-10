@@ -47,21 +47,28 @@ RUN     chmod +x /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]
 
 # ----- tmkms builder stage: builds tmkms from source (softsign backend only)
-# tmkms is not published as a pre-built binary, so we `cargo install` a pinned
-# version. The softsign feature needs only a C compiler — no libusb/OpenSSL
-# (those are pulled in by the yubihsm/ledger backends, which we don't build).
+# Built from the gno fork (aeddi/tmkms) rather than the crates.io release: the
+# fork carries validator-relevant hardening not in upstream 0.15.0 — the Ed25519
+# seed no longer leaks through Debug output, consensus state writes are fsynced,
+# a non-Ed25519 priv_validator_key.json is rejected instead of panicking, and the
+# validator peer ID is required unless explicitly opted out. Pin a tag (not a
+# branch) so the build stays reproducible and cacheable.
+# The softsign feature needs only a C compiler — no libusb/OpenSSL (those are
+# pulled in by the yubihsm/ledger backends, which we don't build).
 # Cold build is ~5 min; pinning TMKMS_VERSION keeps it cacheable.
 FROM    rust:1-slim-bookworm AS tmkms-builder
-ARG     TMKMS_VERSION=0.15.0
+ARG     TMKMS_REPO=https://github.com/aeddi/tmkms
+ARG     TMKMS_VERSION=v0.16.0-gno.3
 # build-essential + pkg-config/libssl/libusb/libudev cover tmkms's native build
 # deps on slim Debian (ubuntu-latest, where gno's CI builds it, ships these). The
 # heavy HSM backends aren't built (softsign feature), but their -sys crates may
 # still probe for the libs during resolution — installing them keeps the build
 # robust across tmkms default-feature changes.
 RUN     apt-get update && apt-get install -y --no-install-recommends \
-  build-essential pkg-config libssl-dev libusb-1.0-0-dev libudev-dev && \
+  build-essential pkg-config libssl-dev libusb-1.0-0-dev libudev-dev git && \
   rm -rf /var/lib/apt/lists/*
-RUN     cargo install tmkms --version ${TMKMS_VERSION} --features softsign --locked --root /usr/local
+RUN     cargo install --git ${TMKMS_REPO} --tag ${TMKMS_VERSION} tmkms \
+  --features softsign --locked --root /usr/local
 
 # ----- tmkms final stage
 FROM    debian:bookworm-slim AS tmkms
