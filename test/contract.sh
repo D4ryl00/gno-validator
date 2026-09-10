@@ -251,5 +251,54 @@ bash -c '
 assert_rc 0 $? "ensure_images guard prevents set -e abort when cmd_build (rebuild-if-drift branch) returns RC_UNCHANGED"
 
 echo ""
+echo "== update =="
+
+classify_state() { STATE_OVERALL="running"; }
+drift_analyze() {
+  DRIFT_IMAGES=0
+  DRIFT_SENTINEL=0
+  DRIFT_ENV=0
+  DRIFT_COMPOSE=0
+}
+FORCE=0 cmd_update >/dev/null 2>&1
+assert_rc 3 $? "update with no drift reports unchanged"
+
+# Guard: cmd_update's cmd_build call site (need_rebuild == 1 branch) must
+# not abort under set -e when cmd_build returns RC_UNCHANGED — an unchanged
+# build still satisfies "images are current" for update, so it is not an
+# error. This site is not reachable with rc 3 through normal control flow
+# (see the comment on the guard in .Makefile.sh), so it cannot be driven
+# here the way the assertion above is — cmd_build itself must be stubbed
+# to force the RC_UNCHANGED return, the same technique used for the
+# ensure_images call sites above. FORCE=1 gets us into the need_rebuild == 1
+# branch unconditionally (cmd_update's `if ((force == 1))` block) without
+# needing real drift, and also skips the confirm prompt (gated on
+# force == 0). This cannot be tested in the harness body above for the same
+# reason noted at "== ensure_images ==": it runs under `set +e`, so there is
+# no abort to prevent there. Keep set -e genuinely active in a subshell.
+bash -c '
+  set -euo pipefail
+  source ./.Makefile.sh
+
+  preflight() { :; }
+  resolve_signer_mode() { :; }
+  resolve_gno_inputs() { :; }
+  classify_state() { STATE_OVERALL="running"; }
+  drift_analyze() {
+    DRIFT_IMAGES=0
+    DRIFT_SENTINEL=0
+    DRIFT_ENV=0
+    DRIFT_COMPOSE=0
+  }
+  cmd_build() { return "$RC_UNCHANGED"; } # simulate "nothing to rebuild"
+  _compose() { :; }
+  _fresh_up() { :; }
+
+  FORCE=1 cmd_update >/dev/null 2>&1
+  exit $?
+' >/dev/null 2>&1
+assert_rc 0 $? "update guard prevents set -e abort when cmd_build returns RC_UNCHANGED"
+
+echo ""
 printf 'passed: %d  failed: %d\n' "$PASS" "$FAIL"
 ((FAIL == 0))

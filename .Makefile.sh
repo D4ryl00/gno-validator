@@ -2111,7 +2111,7 @@ cmd_update() {
 
   if ((need_rebuild == 0 && need_recreate == 0 && force == 0)); then
     echo "Already up to date (pass force=1 to recreate anyway)."
-    return 0
+    return "$RC_UNCHANGED"
   fi
 
   if ((force == 1)); then
@@ -2154,7 +2154,18 @@ cmd_update() {
   fi
 
   if ((need_rebuild == 1)); then
-    cmd_build
+    # cmd_build returns RC_UNCHANGED when inputs already match; for
+    # cmd_update that still satisfies "images are current", so it is not an
+    # error and must not abort under set -e. Not reachable with rc 3 today
+    # (force=1 rules it out structurally, and real drift here means
+    # cmd_build's own short-circuit won't fire either) — guarded anyway
+    # because that non-reachability rests on two independently-maintained
+    # drift calculations agreeing, not on anything structural.
+    local build_rc=0
+    cmd_build || build_rc=$?
+    if ((build_rc != RC_OK && build_rc != RC_UNCHANGED)); then
+      return "$build_rc"
+    fi
     echo ""
   elif ((need_sentinel_pull == 1 || force == 1)); then
     if sentinel_pull; then
