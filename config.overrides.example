@@ -10,11 +10,15 @@
 # telemetry.traces_enabled  = true
 # telemetry.exporter_endpoint = "http://sentinel:4318"
 
-# ---- Optional external signer: tmkms
+# ---- Optional external signer (tmkms or horcrux)
 # Leave this whole block commented to use gnoland's built-in local file signer
-# (the default). Uncomment ONE variant to sign with tmkms. The listen_addr
+# (the default). Uncomment ONE variant to delegate signing. The listen_addr
 # scheme selects the mode; set listen_addr LAST (validation requires the other
 # fields first). See README "Signing".
+#
+# Despite the name, tmkms_listener is not tmkms-only: it speaks the generic
+# upstream Tendermint privval v0.34 protocol, and the signer dials gnoland. Any
+# signer speaking it works — tmkms and horcrux both do.
 #
 # Local tmkms (bundled softsign container, dev/lab) — Unix socket:
 #   'make start' runs a tmkms container that dials this socket. chain_id must
@@ -23,14 +27,21 @@
 # consensus.priv_validator.tmkms_listener.protocol_version = "v0.34"
 # consensus.priv_validator.tmkms_listener.listen_addr      = "unix:///tmkms-sock/privval.sock"
 #
-# Remote tmkms (external host, production) — TCP:
-#   an operator-run tmkms on another host dials in. allowed_kms_pubkeys is the
-#   tmkms identity pubkey (comma-separated for several); required and non-empty.
-#   Also set SIGNER_LISTEN_PORT in validator.env and firewall it to the signer IP.
+# Remote signer (external host, production) — TCP:
+#   an operator-run signer on another host dials in. allowed_kms_pubkeys holds
+#   the signer identity pubkey(s), comma-separated: ONE per tmkms instance, or
+#   ONE per horcrux cosigner (leadership rotates, so every cosigner may hold the
+#   connection). Required and non-empty — it is the only authorization control
+#   on a tcp:// listener. Get the pubkeys from the signer operator; give them
+#   the node identity that 'make gen-identity' prints.
+#   Also set SIGNER_LISTEN_PORT in validator.env and firewall it to the signer IPs.
 # consensus.priv_validator.tmkms_listener.chain_id            = "<chain-id>"
 # consensus.priv_validator.tmkms_listener.protocol_version    = "v0.34"
-# consensus.priv_validator.tmkms_listener.allowed_kms_pubkeys = "ed25519:<tmkms-identity-pubkey>"
+# consensus.priv_validator.tmkms_listener.allowed_kms_pubkeys = "<pubkey1>,<pubkey2>,<pubkey3>"
 # consensus.priv_validator.tmkms_listener.listen_addr         = "tcp://0.0.0.0:26659"
+#
+#   With horcrux, each cosigner also needs a persistent connKeyFile and
+#   thresholdMode.leaderOnlyChainNodeConnections = true. See README "Signing".
 
 # ---- Required node settings
 moniker = "anon-val-01"

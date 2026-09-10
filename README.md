@@ -2,11 +2,14 @@
 
 Docker Compose setup for a `gnoland` validator node.
 By default the node signs with its built-in local file signer; optionally it can
-use [`tmkms`](https://github.com/iqlusioninc/tmkms) as a remote signer — either a
-**bundled** tmkms container on the same host (dev/lab) or an **external** tmkms on
-a dedicated host (production). The signer is selected entirely in `config.overrides`.
+delegate signing to an **external signer** over gnoland's privval listener — a
+**bundled** `tmkms` container on the same host (dev/lab), or an external signer on
+dedicated hosts (production): [`tmkms`](https://github.com/aeddi/tmkms) with an
+HSM, or [`horcrux`](https://github.com/aeddi/horcrux) for threshold signing across
+several machines. The signer is selected entirely in `config.overrides`.
 `gnoland` is built from source (`gnolang/gno`); the bundled tmkms image is built
-from source (`iqlusioninc/tmkms`, softsign backend) only when local mode is used.
+from source (`aeddi/tmkms`, the gno fork, softsign backend) only when local mode
+is used.
 A `sentinel` sidecar ships node metrics, logs, and OTLP traces to an external [gno-watchtower](https://github.com/aeddi/gno-watchtower) server.
 
 ## Prerequisites
@@ -55,7 +58,7 @@ Behavior depends on the signer selected in `config.overrides` (see [Signing](#si
 
 - **local file signer** (default) — creates `gnoland-data/secrets/priv_validator_key.json` and prints the validator address / pub_key / node peer ID.
 - **local tmkms** (`unix://` listener) — also writes `tmkms-data/consensus.key` (the softsign consensus key, derived from the same validator key) for the bundled tmkms container.
-- **remote tmkms** (`tcp://` listener) — generates no signing key locally; prints the node peer ID and the values to exchange with the tmkms operator.
+- **remote signer** (`tcp://` listener) — generates no signing key locally; prints the node's identity in both encodings (peer ID for tmkms, conn pubkey for horcrux) and the values to exchange with the signer operator.
 
 ### 5. Provide `genesis.json`
 
@@ -95,8 +98,8 @@ make status watch=5      # live status table (height, peers, VP) refreshing ever
 | `GNOLAND_RPC_PORT`    | `26657`                           | Host port mapped to gnoland RPC.                                                                                                                                                                                                                  |
 | `GNOLAND_P2P_LADDR`   | `0.0.0.0`                         | Host interface gnoland P2P binds to. Use `127.0.0.1` only if this node should not accept inbound peer connections.                                                                                                                                |
 | `GNOLAND_P2P_PORT`    | `26656`                           | Host port mapped to gnoland P2P.                                                                                                                                                                                                                  |
-| `SIGNER_LISTEN_LADDR`  | `0.0.0.0`                         | Host interface for the tmkms privval listener. Only used with a **remote** (`tcp://`) tmkms signer; inert otherwise. Restrict / firewall to the signer host in production.                                                                         |
-| `SIGNER_LISTEN_PORT`   | `26659`                           | Host port mapped to the tmkms privval listener (remote mode).                                                                                                                                                                                     |
+| `SIGNER_LISTEN_LADDR`  | `0.0.0.0`                         | Host interface for the external signer's privval listener. Only used with a **remote** (`tcp://`) signer — tmkms or horcrux; inert otherwise. Restrict / firewall to the signer host in production.                                               |
+| `SIGNER_LISTEN_PORT`   | `26659`                           | Host port mapped to the external signer's privval listener (remote mode). The gnoland config key driving it is named `tmkms_listener` upstream, but the protocol is the generic Tendermint privval one — horcrux uses it too.                     |
 | `GNOLAND_EXTRA_FLAGS` | `--skip-genesis-sig-verification` | Extra flags appended to `gnoland start`, word-split on whitespace. Add or remove as needed (e.g. `--skip-genesis-sig-verification --log-level info`).                                                                                             |
 | `GNOLAND_NTP_UPDATE`  | `1`                               | Any non-empty value enables in-container NTP sync at gnoland startup (tries `ntpd`, then `rdate`, then an HTTPS `Date` header; first success wins). Set empty to skip — e.g. when `chronyd` / `systemd-timesyncd` already manages the host clock. |
 | `GNOLAND_LOG_SIZE`    | `3`                               | Number of 1 GB gnoland log files to keep (3 × 1 GB = 3 GB total).                                                                                                                                                                                 |
@@ -124,7 +127,7 @@ Per-node gnoland config. Each line is `key = value`; `#` comments and blank line
 
 **Signer fields** (optional; commented out by default → local file signer). Set these to use tmkms — see [Signing](#signing):
 
-- `consensus.priv_validator.tmkms_listener.listen_addr` — `unix://…` (bundled local tmkms) or `tcp://…` (remote tmkms). Empty/absent = local file signer. Set this key **last**.
+- `consensus.priv_validator.tmkms_listener.listen_addr` — `unix://…` (bundled local tmkms) or `tcp://…` (remote signer: tmkms or horcrux). Empty/absent = local file signer. Set this key **last**.
 - `consensus.priv_validator.tmkms_listener.chain_id` — must match tmkms's `[[validator]].chain_id`.
 - `consensus.priv_validator.tmkms_listener.protocol_version` — must be `"v0.34"`.
 - `consensus.priv_validator.tmkms_listener.allowed_kms_pubkeys` — required (non-empty) on `tcp://`; the tmkms identity pubkey(s), comma-separated. Ignored on `unix://`.
@@ -157,7 +160,7 @@ Sentinel's format is defined upstream. See [gno-watchtower → Sentinel config](
 | `make stop`             | Stops services but keeps containers (no recreate). Idempotent.                                                                                                                                  | Free.                                           |
 | `make restart`          | `stop` + `start`. Re-applies `config.overrides` on the way up.                                                                                                                                  | Free.                                           |
 | `make update [force=1]` | Rebuilds images if build inputs changed, pulls sentinel on digest drift, recreates containers if `validator.env` / `docker-compose.yml` changed. `force=1` does everything unconditionally.     | Rebuild minutes; recreate wipes container logs. |
-| `make reset [yes=1]`    | Wipes chain state (`db`, `wal`, `priv_validator_state.json`, and in local tmkms mode `tmkms-data/consensus_state.json`). Prompts to stop and restart around the wipe; `yes=1` skips all prompts. Preserves signing keys (`tmkms-data/consensus.key`, validator key) and node_id. With a *remote* tmkms, its double-sign state lives on the signer host and must be reset there. | Destructive on chain DB; clears double-sign protection. |
+| `make reset [yes=1]`    | Wipes chain state (`db`, `wal`, `priv_validator_state.json`, and in local tmkms mode `tmkms-data/consensus_state.json`). Prompts to stop and restart around the wipe; `yes=1` skips all prompts. Preserves signing keys (`tmkms-data/consensus.key`, validator key) and node_id. With a *remote* signer, its double-sign state lives on the signer host and must be reset there — delete tmkms's `consensus_state.json`, or run `horcrux state set <chain-id> 0` on every cosigner. | Destructive on chain DB; clears double-sign protection. |
 
 ### Build (rarely needed manually)
 
@@ -206,7 +209,7 @@ Downloaded tools (gonzo, jq) live under `.tools/bin/` (gitignored, auto-fetched 
 ## Architecture
 
 - **gnoland** exposes RPC (`GNOLAND_RPC_PORT`, default `26657`) and P2P (`GNOLAND_P2P_PORT`, default `26656`) to the host. When `GNOLAND_NTP_UPDATE` is set (default), the container syncs its clock before launching gnoland, trying `ntpd`, then `rdate`, then an HTTPS `Date` header until one succeeds. The container has `CAP_SYS_TIME`, so on a Linux host this also updates the host's clock — disable `GNOLAND_NTP_UPDATE` if another NTP daemon already manages the host.
-- **tmkms** (optional) signs votes/proposals for gnoland via the upstream Tendermint privval v0.34 protocol — **tmkms dials gnoland**, which listens. In local mode it runs as a bundled container reaching gnoland over a shared Unix socket (no network port). In remote mode it runs on a dedicated host and connects to gnoland's TCP listener (`SIGNER_LISTEN_PORT`, default `26659`).
+- **external signer** (optional) signs votes/proposals for gnoland via the upstream Tendermint privval v0.34 protocol — **the signer dials gnoland**, which listens. Any signer speaking that protocol works; tmkms and horcrux both do. In local mode a bundled tmkms container reaches gnoland over a shared Unix socket (no network port). In remote mode the signer runs on dedicated hosts and connects to gnoland's TCP listener (`SIGNER_LISTEN_PORT`, default `26659`).
 - **sentinel** collects gnoland RPC status, container logs, OTLP traces, and system resources, then forwards them to a central watchtower server. Image is pulled from `ghcr.io/aeddi/gno-watchtower/sentinel` (tag set via `SENTINEL_IMAGE_TAG`).
 - `gnoland-data/`, `tmkms-data/`, and `genesis.json` are gitignored — back them up.
 
@@ -218,11 +221,53 @@ The signer is selected in `config.overrides` via `consensus.priv_validator.tmkms
 | --- | --- | --- | --- | --- |
 | **Local file signer** (default) | _(unset)_ | — | `gnoland-data/secrets/priv_validator_key.json` | Simplest; single-host, no KMS |
 | **Local tmkms** | `unix:///tmkms-sock/privval.sock` | bundled container (`make start`) | `tmkms-data/consensus.key` (softsign, on disk) | Dev/lab parity with the tmkms path |
-| **Remote tmkms** | `tcp://0.0.0.0:26659` | operator-run, dedicated host | on the tmkms host (HSM/softsign) | Production |
+| **Remote signer** | `tcp://0.0.0.0:26659` | operator-run, dedicated host(s) | on the signer host(s) — HSM, softsign, or split into key shards | Production |
 
-**Local tmkms.** `make gen-identity` creates the validator key and exports its softsign copy to `tmkms-data/consensus.key`. `make start` builds the tmkms image (Rust, several minutes on first run) and runs the container; tmkms dials gnoland's Unix socket. Softsign keeps the key on disk, so this is **dev/lab only** — for production use a remote tmkms with an HSM.
+`tmkms_listener` is an upstream gnoland config name, not a tmkms-only feature: it
+speaks the generic upstream Tendermint privval v0.34 protocol over an encrypted
+SecretConnection, and **the signer dials gnoland**. Anything speaking that
+protocol can drive it — this repo documents `tmkms` (single signer, HSM-backed)
+and `horcrux` (threshold signing across several hosts).
 
-**Remote tmkms.** `make gen-identity` prints the **node peer ID**; give it, the `chain_id`, and the `listen_addr` to the tmkms operator. They pin the peer ID in tmkms's `addr = "tcp://<peer-id>@<host>:26659"` and hand back their **tmkms identity pubkey**, which you put in `allowed_kms_pubkeys`. Register the validator's consensus pub_key (from the tmkms host) in `genesis.json`. Start tmkms first (it retries via `reconnect = true`); gnoland then waits up to 60 s for it to dial in. Firewall `SIGNER_LISTEN_PORT` to the signer's IP.
+**Local tmkms.** `make gen-identity` creates the validator key and exports its softsign copy to `tmkms-data/consensus.key`. `make start` builds the tmkms image (Rust, several minutes on first run) and runs the container; tmkms dials gnoland's Unix socket. Softsign keeps the key on disk, so this is **dev/lab only** — for production use a remote signer.
+
+**Remote signer, common setup.** In this mode nothing signs on this host, so you can run everything here *except* the signer: `make start` brings up gnoland and sentinel and opens the privval listener, and the signer connects from wherever it runs. `make gen-identity` generates no signing key; it prints the `chain_id`, the `listen_addr`, and this node's identity in the two encodings signers pin:
+
+| Printed value | Pinned by | Where |
+| --- | --- | --- |
+| node peer ID | tmkms | `addr = "tcp://<peer-id>@<host>:26659"` |
+| node conn pubkey (64 hex) | horcrux | `chainNodes[].connPubKey` |
+
+In return you get the signer's identity pubkey(s), which go in `allowed_kms_pubkeys` — **one entry per tmkms instance, or one per horcrux cosigner**, comma-separated. gnoland rejects an empty allowlist on a `tcp://` listener, since it is the only authorization control there. Register the validator's consensus pub_key (from the signer host) in `genesis.json`, start the signer **before** the node — gnoland waits only 60 s (`wait_for_connection_timeout`) for it to dial in — and firewall `SIGNER_LISTEN_PORT` to the signer hosts' IPs.
+
+**Remote signer: tmkms.** Pin this node's **peer ID** in tmkms's `addr`, and put tmkms's identity pubkey in `allowed_kms_pubkeys`. tmkms retries via `reconnect = true`, so it can be started first and left to dial.
+
+**Remote signer: horcrux (threshold signing).** [horcrux](https://github.com/aeddi/horcrux) splits the consensus key into shards held by separate cosigners, so no single host can sign alone. Use the `aeddi/horcrux` fork — it carries the tm2 compatibility fixes vanilla horcrux lacks (a spec-compliant sign response, which tm2 validates strictly, and leader-only chain-node connections). Three requirements are specific to gnoland and easy to get wrong:
+
+1. **`connKeyFile` is mandatory**, though upstream horcrux docs present it as optional. Without a persistent connection identity each cosigner dials with a freshly generated key, which can never match the allowlist gnoland requires on `tcp://`. Run `horcrux create-conn-key` on **each** cosigner and put **all** of their pubkeys in `allowed_kms_pubkeys` — leadership rotates, so any of them may hold the connection.
+2. **`leaderOnlyChainNodeConnections: true`** under `thresholdMode`. gnoland holds exactly one signer slot with a 3 s accept window. With every cosigner dialing, the connection churns about once a second and the validator signs **nothing**. Leader-only dialing gives the node one stable connection and hands it over on a leadership change.
+3. **Double-sign state is per cosigner.** `make reset` cannot clear it from here; run `horcrux state set <chain-id> 0` on every cosigner if you restart the chain from genesis.
+
+A matching `config.yaml` on each cosigner:
+
+```yaml
+connKeyFile: conn_key.json # from 'horcrux create-conn-key', per cosigner
+thresholdMode:
+    threshold: 2
+    leaderOnlyChainNodeConnections: true
+    cosigners:
+        - shardID: 1
+          p2pAddr: tcp://horcrux-1:2222
+        - shardID: 2
+          p2pAddr: tcp://horcrux-2:2222
+        - shardID: 3
+          p2pAddr: tcp://horcrux-3:2222
+chainNodes:
+    - privValAddr: tcp://<this-node>:26659
+      connPubKey: <node conn pubkey from 'make gen-identity'>
+```
+
+See [horcrux's authentication docs](https://github.com/aeddi/horcrux/blob/main/docs/authentication.md) for cosigner-to-cosigner mutual TLS and the full pinning matrix. `test/e2e-horcrux.sh` runs this whole topology end to end (see [`test/README.md`](test/README.md)).
 
 ## Logging
 
