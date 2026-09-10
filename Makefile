@@ -49,7 +49,7 @@ PROJECT_ROOT := $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
 SCRIPT       := bash $(PROJECT_ROOT)/.Makefile.sh
 
 .PHONY: help gen-identity infos build start stop restart update reset \
-        logs status clean-imgs e2e
+        logs status clean-imgs e2e e2e-horcrux
 
 help:
 	@awk '/^# Usage:/,/^$$/{sub(/^# ?/,""); print}' $(MAKEFILE_LIST)
@@ -95,3 +95,9 @@ build:
 # first run). Fully isolated from any live deployment. See test/README.md.
 e2e:
 	@bash $(PROJECT_ROOT)/test/e2e-tmkms-local.sh
+
+# End-to-end test of the remote signer path, driven by a 2-of-3 horcrux cluster
+# (builds gnoland + horcrux; ~15 min on first run). Isolated from any live
+# deployment and from `make e2e`, so both can run at once. See test/README.md.
+e2e-horcrux:
+	@bash $(PROJECT_ROOT)/test/e2e-horcrux.sh
