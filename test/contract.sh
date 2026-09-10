@@ -106,23 +106,65 @@ classify_state() { STATE_OVERALL="none"; }
 cmd_restart >/dev/null 2>&1
 assert_rc 1 $? "restart with no containers is an error"
 
-# A running stack: cmd_restart calls cmd_stop (rc 0) then cmd_start. Re-stub
-# classify_state to report 'stopped' on the second call so cmd_start takes the
-# start path, exactly as it would in reality.
+# A running stack where cmd_stop returns RC_UNCHANGED. Call sequence:
+# 1. cmd_restart's classify_state: running (enters else branch)
+# 2. cmd_stop's classify_state: stopped → returns RC_UNCHANGED (3)
+# 3. cmd_start's classify_state: stopped → returns 0 (changed)
+# The guard must accept RC_UNCHANGED (3) and continue to cmd_start.
 _CLASSIFY_CALLS=0
 classify_state() {
   _CLASSIFY_CALLS=$((_CLASSIFY_CALLS + 1))
-  if ((_CLASSIFY_CALLS >= 3)); then
+  if ((_CLASSIFY_CALLS == 1)); then
+    STATE_OVERALL="running"
+  elif ((_CLASSIFY_CALLS == 2)); then
     STATE_OVERALL="stopped"
   else
-    STATE_OVERALL="running"
+    STATE_OVERALL="stopped"
   fi
   STATE_GNOLAND="running"
   STATE_TMKMS="absent"
   STATE_SENTINEL="running"
 }
 cmd_restart >/dev/null 2>&1
-assert_rc 0 $? "restart on a running stack reports changed"
+assert_rc 0 $? "restart proceeds when cmd_stop returns RC_UNCHANGED"
+
+# Verify the guard prevents abort under set -e when cmd_stop returns RC_UNCHANGED.
+# Without the guard, a bare cmd_stop returning 3 would abort the script under set -e.
+# This subshell keeps set -e active throughout to demonstrate the guard is necessary.
+bash -c '
+  set -euo pipefail
+  source ./.Makefile.sh
+
+  preflight() { :; }
+  resolve_signer_mode() { :; }
+  resolve_input_hashes() { :; }
+  resolve_gno_inputs() { :; }
+  drift_analyze() { :; }
+  drift_warn() { :; }
+  ensure_images() { :; }
+  _fresh_up() { :; }
+  _compose() { :; }
+  _compose_noenv() { :; }
+
+  _CLASSIFY_CALLS=0
+  classify_state() {
+    _CLASSIFY_CALLS=$((_CLASSIFY_CALLS + 1))
+    if ((_CLASSIFY_CALLS == 1)); then
+      STATE_OVERALL="running"
+    elif ((_CLASSIFY_CALLS == 2)); then
+      STATE_OVERALL="stopped"
+    else
+      STATE_OVERALL="stopped"
+    fi
+    STATE_GNOLAND="running"
+    STATE_TMKMS="absent"
+    STATE_SENTINEL="running"
+  }
+
+  cmd_restart >/dev/null 2>&1
+  exit $?
+' >/dev/null 2>&1
+assert_rc 0 $? "restart guard prevents set -e abort when cmd_stop returns RC_UNCHANGED"
 
 echo ""
 printf 'passed: %d  failed: %d\n' "$PASS" "$FAIL"
