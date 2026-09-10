@@ -2146,6 +2146,13 @@ cmd_update() {
 }
 
 # ---- Dispatch
+# Skipped when the file is sourced rather than executed, so test/contract.sh can
+# load every helper as a library and stub the Docker-touching ones. Normal use
+# (`make <target>` → `bash .Makefile.sh <cmd>`) is unaffected: there
+# BASH_SOURCE[0] and $0 are the same path.
+if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
+  return 0
+fi
 
 cmd="${1:-}"
 if [[ -z "$cmd" ]]; then
