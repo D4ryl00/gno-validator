@@ -204,13 +204,16 @@ if [[ -n "$HORCRUX_IMAGE_PREBUILT" ]]; then
   docker image inspect "$HORCRUX_IMAGE" >/dev/null 2>&1 ||
     fail "HORCRUX_IMAGE='${HORCRUX_IMAGE}' not found locally"
 else
-  # Build straight from the git URL — the fork publishes no image yet, and this
-  # keeps the test independent of a local horcrux checkout.
+  # Built from test/Dockerfile.horcrux, which clones the fork and builds the
+  # binary onto alpine. The fork's own docker/horcrux/Dockerfile is unusable:
+  # it assembles a scratch image from ghcr.io/strangelove-ventures/infra-toolkit,
+  # which stopped serving anonymous pulls (403) when upstream was archived.
   log "Building horcrux image from ${HORCRUX_REPO}#${HORCRUX_REF}"
   docker build "${BUILD_ARGS[@]}" \
-    -f docker/horcrux/Dockerfile \
-    -t "$HORCRUX_IMAGE" \
-    "${HORCRUX_REPO}#${HORCRUX_REF}" ||
+    -f "$REPO_ROOT/test/Dockerfile.horcrux" \
+    --build-arg "HORCRUX_REPO=${HORCRUX_REPO}" \
+    --build-arg "HORCRUX_REF=${HORCRUX_REF}" \
+    -t "$HORCRUX_IMAGE" "$REPO_ROOT/test" ||
     fail "horcrux image build failed"
 fi
 
@@ -461,10 +464,13 @@ count_cosigners_logging() { # <pattern>
   done
   printf '%s' "$n"
 }
+# A cosigner emits this only when the leadership gate is installed and reports
+# false, so any occurrence proves the flag is on. The eventual leader logs it
+# too, before it wins the election, so the count can legitimately reach SHARDS.
 parked="$(count_cosigners_logging "Not the cluster leader, deferring connection to chain node")"
 [[ "$parked" -ge $((SHARDS - 1)) ]] ||
-  fail "expected >= $((SHARDS - 1)) cosigners to park without dialing, found ${parked} — is leaderOnlyChainNodeConnections set?"
-echo "  OK: ${parked} of ${SHARDS} cosigners parked without dialing"
+  fail "expected >= $((SHARDS - 1)) cosigners to defer dialing, found ${parked} — is leaderOnlyChainNodeConnections set?"
+echo "  OK: leader-only gating active (${parked}/${SHARDS} cosigners deferred dialing at some point)"
 
 # --- 9. Leadership handoff --------------------------------------------------
 # The single privval slot must move to the new leader. This is the behaviour

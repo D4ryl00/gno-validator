@@ -1216,7 +1216,7 @@ cmd_gen_identity() {
     echo "  listen_addr:       ${listen_addr:-(set in config.overrides)}"
     echo ""
     echo "  This node's identity — the signer pins ONE of these, per signer:"
-    echo "    node peer ID:    ${node_id:-(unavailable)}"
+    echo "    node peer ID:     ${node_id:-(unavailable)}"
     echo "                     # tmkms:   addr = \"tcp://<peer-id>@<host>:26659\""
     echo "    node conn pubkey: ${conn_pubkey:-(unavailable)}"
     echo "                     # horcrux: chainNodes[].connPubKey"

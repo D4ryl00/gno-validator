@@ -1,0 +1,37 @@
+# Builds the horcrux binary for test/e2e-horcrux.sh.
+#
+# Deliberately NOT the fork's own docker/horcrux/Dockerfile: that one assembles
+# a minimal scratch image from ghcr.io/strangelove-ventures/infra-toolkit, which
+# stopped serving anonymous pulls (403) once upstream was archived, so it cannot
+# be built at all. Packaging is not what this e2e tests — signing behavior is —
+# so build the binary here and run it on plain alpine.
+#
+# Mirrors the gnoland builder stage in the repo root Dockerfile: clone by ARG,
+# build, copy into a small runtime image.
+FROM    golang:1.25-alpine AS builder
+ARG     HORCRUX_REPO=https://github.com/aeddi/horcrux.git
+ARG     HORCRUX_REF=main
+
+RUN     apk add --no-cache git ca-certificates gcc musl-dev linux-headers
+
+RUN     git clone ${HORCRUX_REPO} /src && \
+  git -C /src checkout ${HORCRUX_REF}
+
+WORKDIR /src
+
+# CGO on (the fork's own image builds this way): go-ethereum's crypto pulls in
+# cgo paths. Static linking keeps the binary self-contained on alpine.
+RUN     CGO_ENABLED=1 go build -mod readonly \
+  -ldflags '-linkmode external -extldflags "-static"' \
+  -o /usr/local/bin/horcrux ./cmd/horcrux
+
+# ----- final stage
+FROM    alpine:3
+
+RUN     apk add --no-cache ca-certificates
+
+COPY    --from=builder /usr/local/bin/horcrux /usr/local/bin/horcrux
+
+# The e2e runs containers with --user "$(id -u):$(id -g)" against bind-mounted
+# cosigner homes, so no image-side user is created here on purpose.
+ENTRYPOINT []
