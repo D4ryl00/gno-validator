@@ -14,6 +14,7 @@
 #
 # Inspection:
 #   status         [watch=<sec>]     Show block height, peers, and validator status (watch= refreshes every N seconds)
+#   status-json                      Machine-readable status as one JSON object (for automation)
 #   infos                            Print node identity, network config, build metadata, checksums
 #   logs           [since=<d>]       Open merged TUI of gnoland + sentinel (+ tmkms in local mode) logs — downloads gonzo on first run.
 #
@@ -49,7 +50,7 @@ PROJECT_ROOT := $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
 SCRIPT       := bash $(PROJECT_ROOT)/.Makefile.sh
 
 .PHONY: help gen-identity infos build start stop restart update reset \
-        logs status clean-imgs e2e e2e-horcrux
+        logs status status-json clean-imgs e2e e2e-horcrux
 
 help:
 	@awk '/^# Usage:/,/^$$/{sub(/^# ?/,""); print}' $(MAKEFILE_LIST)
@@ -80,6 +81,9 @@ logs:
 
 status:
 	@$(SCRIPT) status
+
+status-json:
+	@$(SCRIPT) status-json
 
 clean-imgs:
 	@$(SCRIPT) clean-imgs

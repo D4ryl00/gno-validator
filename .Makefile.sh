@@ -1795,6 +1795,58 @@ _status_raw() {
   echo "$n"
 }
 
+# ---- Machine-readable status
+# Emits one flat JSON object for automation (Ansible health gates poll
+# .catching_up and .height). Distinct from cmd_status, which is a human table
+# and free to change its layout. Every key is always present so a consumer can
+# index without existence checks; when the RPC is unreachable the numeric
+# fields are 0, catching_up is true (the conservative reading — "do not treat
+# this node as caught up"), and the string fields are empty.
+cmd_status_json() {
+  preflight docker
+  classify_state
+  resolve_ports
+
+  local jq_bin
+  if ! jq_bin="$(ensure_jq)"; then
+    echo "Error: status-json requires jq and the auto-install failed." >&2
+    return "$RC_ERR"
+  fi
+
+  local status_json net_json reachable=true
+  status_json="$(_http_get "http://localhost:${GNOLAND_RPC_PORT}/status" || true)"
+  net_json="$(_http_get "http://localhost:${GNOLAND_RPC_PORT}/net_info" || true)"
+  if [[ -z "$status_json" ]]; then
+    reachable=false
+    status_json='{}'
+  fi
+  [[ -z "$net_json" ]] && net_json='{}'
+
+  # --argjson for the booleans so they land unquoted; tonumber? on the height
+  # and peer counts because tm2 returns them as JSON strings. catching_up
+  # can't use the same `// true` fallback: jq's // treats `false` itself as
+  # falsy, so a genuinely caught-up node's `false` would be silently flipped
+  # to true. An explicit null check keeps a real false as false.
+  printf '%s' "$status_json" | "$jq_bin" -c \
+    --argjson reachable "$reachable" \
+    --arg containers "${STATE_OVERALL:-none}" \
+    --arg gnoland "${STATE_GNOLAND:-absent}" \
+    --arg sentinel "${STATE_SENTINEL:-absent}" \
+    --argjson net "$net_json" \
+    '{
+      containers:    $containers,
+      gnoland:       $gnoland,
+      sentinel:      $sentinel,
+      rpc_reachable: $reachable,
+      height:        ((.result.sync_info.latest_block_height // "0") | tonumber? // 0),
+      catching_up:   (if $reachable then (.result.sync_info.catching_up as $c | if $c == null then true else $c end) else true end),
+      peers:         (($net.result.n_peers // "0") | tonumber? // 0),
+      voting_power:  (.result.validator_info.voting_power // ""),
+      moniker:       (.result.node_info.moniker // ""),
+      network:       (.result.node_info.network // "")
+    }'
+}
+
 _http_get() {
   local url="$1"
   if command -v curl >/dev/null 2>&1; then
@@ -2211,6 +2263,7 @@ stop) cmd_stop ;;
 restart) cmd_restart ;;
 logs) cmd_logs ;;
 status) cmd_status ;;
+status-json) cmd_status_json ;;
 reset) cmd_reset ;;
 clean-imgs) cmd_clean_imgs ;;
 update) cmd_update ;;

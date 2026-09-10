@@ -300,5 +300,60 @@ bash -c '
 assert_rc 0 $? "update guard prevents set -e abort when cmd_build returns RC_UNCHANGED"
 
 echo ""
+echo "== status-json =="
+
+assert_json_field() {
+  local json="$1" field="$2" expected="$3" desc="$4"
+  local actual
+  actual="$(printf '%s' "$json" | "$JQ_FOR_TESTS" -r "$field" 2>/dev/null)"
+  if [[ "$actual" == "$expected" ]]; then
+    ok "$desc"
+  else
+    bad "$desc (expected ${expected}, got ${actual})"
+  fi
+}
+
+if ! JQ_FOR_TESTS="$(command -v jq)"; then
+  bad "jq is required to run the status-json tests; install it and re-run"
+else
+  classify_state() {
+    STATE_OVERALL="running"
+    STATE_GNOLAND="running"
+    STATE_SENTINEL="running"
+  }
+  resolve_ports() { GNOLAND_RPC_PORT=26657; }
+  ensure_jq() { echo "$JQ_FOR_TESTS"; }
+  _http_get() {
+    case "$1" in
+    *"/status") cat <<'EOS'
+{"result":{"node_info":{"moniker":"sentry1","network":"gno-mainnet"},
+"sync_info":{"latest_block_height":"12345","catching_up":false},
+"validator_info":{"voting_power":"1000"}}}
+EOS
+      ;;
+    *"/net_info") echo '{"result":{"n_peers":"8"}}' ;;
+    esac
+  }
+
+  out="$(cmd_status_json 2>/dev/null)"
+  assert_rc 0 $? "status-json on a healthy node returns RC_OK"
+  assert_json_field "$out" '.containers'    'running'      "containers is reported"
+  assert_json_field "$out" '.rpc_reachable' 'true'         "rpc_reachable is true"
+  assert_json_field "$out" '.height'        '12345'        "height is numeric"
+  assert_json_field "$out" '.catching_up'   'false'        "catching_up is boolean false"
+  assert_json_field "$out" '.peers'         '8'            "peers is numeric"
+  assert_json_field "$out" '.moniker'       'sentry1'      "moniker is reported"
+
+  # Unreachable RPC: every key must still be present with its documented zero.
+  _http_get() { return 1; }
+  out="$(cmd_status_json 2>/dev/null)"
+  assert_rc 0 $? "status-json with unreachable RPC still returns RC_OK"
+  assert_json_field "$out" '.rpc_reachable' 'false' "rpc_reachable is false when unreachable"
+  assert_json_field "$out" '.height'        '0'     "height is 0 when unreachable"
+  assert_json_field "$out" '.catching_up'   'true'  "catching_up is true when unreachable"
+  assert_json_field "$out" '.moniker'       ''      "moniker is empty when unreachable"
+fi
+
+echo ""
 printf 'passed: %d  failed: %d\n' "$PASS" "$FAIL"
 ((FAIL == 0))
