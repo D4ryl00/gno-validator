@@ -39,7 +39,7 @@ temp dir, and (by default) the e2e images are removed on exit.
 | `GNO_REPO` | `gnolang/gno` | gno source repo slug (matches `validator.env.example`) |
 | `GNO_VERSION` | `master` | gno ref to build (matches `validator.env.example`); carries `tmkms_listener` support since PR #5718 |
 | `CHAIN_ID` | `gno-tmkms-e2e` | test chain id |
-| `RPC_PORT` / `P2P_PORT` / `TMKMS_PORT` | `36657` / `36656` / `36659` | host ports |
+| `RPC_PORT` / `P2P_PORT` / `SIGNER_PORT` | `36657` / `36656` / `36659` | host ports |
 | `KEEP_IMAGES=1` | _(off)_ | keep the e2e images after the run (faster re-runs) |
 | `NO_CACHE=1` | _(off)_ | `docker build --no-cache` |
 

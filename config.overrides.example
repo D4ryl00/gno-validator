@@ -26,7 +26,7 @@
 # Remote tmkms (external host, production) — TCP:
 #   an operator-run tmkms on another host dials in. allowed_kms_pubkeys is the
 #   tmkms identity pubkey (comma-separated for several); required and non-empty.
-#   Also set TMKMS_LISTEN_PORT in validator.env and firewall it to the signer IP.
+#   Also set SIGNER_LISTEN_PORT in validator.env and firewall it to the signer IP.
 # consensus.priv_validator.tmkms_listener.chain_id            = "<chain-id>"
 # consensus.priv_validator.tmkms_listener.protocol_version    = "v0.34"
 # consensus.priv_validator.tmkms_listener.allowed_kms_pubkeys = "ed25519:<tmkms-identity-pubkey>"

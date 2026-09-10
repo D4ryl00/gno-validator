@@ -71,9 +71,10 @@ services:
     ports:
       - '${GNOLAND_RPC_LADDR:-0.0.0.0}:${GNOLAND_RPC_PORT:-26657}:26657'
       - '${GNOLAND_P2P_LADDR:-0.0.0.0}:${GNOLAND_P2P_PORT:-26656}:26656'
-      # tmkms privval listener (remote mode). Inert unless config.overrides sets
-      # a tcp:// tmkms_listener.listen_addr. Host binding via TMKMS_LISTEN_*.
-      - '${TMKMS_LISTEN_LADDR:-0.0.0.0}:${TMKMS_LISTEN_PORT:-26659}:26659'
+      # External signer privval listener (remote mode: tmkms or horcrux). Inert
+      # unless config.overrides sets a tcp:// tmkms_listener.listen_addr.
+      # Host binding via SIGNER_LISTEN_LADDR / SIGNER_LISTEN_PORT.
+      - '${SIGNER_LISTEN_LADDR:-0.0.0.0}:${SIGNER_LISTEN_PORT:-26659}:26659'
     cap_add:
       - SYS_TIME
     restart: on-failure

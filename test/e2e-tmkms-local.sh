@@ -21,7 +21,7 @@
 #   GNO_REPO      gno source repo slug          (default: D4ryl00/gno)
 #   GNO_VERSION   branch/tag/commit with tmkms  (default: a pinned commit)
 #   CHAIN_ID      test chain id                 (default: gno-tmkms-e2e)
-#   RPC_PORT/P2P_PORT/TMKMS_PORT  host ports     (default: 36657/36656/36659)
+#   RPC_PORT/P2P_PORT/SIGNER_PORT  host ports     (default: 36657/36656/36659)
 #   KEEP_IMAGES=1 keep the e2e images after the run (default: removed)
 #   NO_CACHE=1    docker build --no-cache
 set -euo pipefail
@@ -34,7 +34,7 @@ GNO_VERSION="${GNO_VERSION:-master}"
 CHAIN_ID="${CHAIN_ID:-gno-tmkms-e2e}"
 RPC_PORT="${RPC_PORT:-36657}"
 P2P_PORT="${P2P_PORT:-36656}"
-TMKMS_PORT="${TMKMS_PORT:-36659}"
+SIGNER_PORT="${SIGNER_PORT:-36659}"
 
 PROJECT="gno-validator-e2e"
 GNOLAND_IMAGE="gno-validator-e2e-gnoland"
@@ -128,8 +128,8 @@ GNOLAND_P2P_PORT=${P2P_PORT}
 GNOLAND_EXTRA_FLAGS=--skip-genesis-sig-verification
 GNOLAND_NTP_UPDATE=
 TMKMS_CHAIN_ID=${CHAIN_ID}
-TMKMS_LISTEN_LADDR=127.0.0.1
-TMKMS_LISTEN_PORT=${TMKMS_PORT}
+SIGNER_LISTEN_LADDR=127.0.0.1
+SIGNER_LISTEN_PORT=${SIGNER_PORT}
 EOF
 
 # Local (unix://) tmkms — listen_addr LAST (validation requires the rest first).
