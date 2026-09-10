@@ -1,4 +1,4 @@
-# Makefile — gno-validator: gnoland validator node with optional tmkms remote signing.
+# Makefile — gno-validator: gnoland validator node with optional remote signing (tmkms or horcrux).
 #
 # Usage: make <target> [args]
 #

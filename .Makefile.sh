@@ -1159,7 +1159,7 @@ cmd_gen_identity() {
   case "$TMKMS_MODE" in
   off)
     # Local file signer: gnoland holds and uses priv_validator_key.json.
-    echo "Signer mode: local file signer (no tmkms configured)."
+    echo "Signer mode: local file signer (no external signer configured)."
     _ensure_gnoland_secrets
     echo ""
     echo "Validator identity:"
