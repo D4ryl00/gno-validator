@@ -116,3 +116,20 @@ dir, and (by default) the images it built are removed on exit.
 > The fork publishes no image yet, so the default is to build from source. Point
 > `HORCRUX_IMAGE` at a locally built image (e.g. from a working checkout) to
 > test changes without pushing them.
+
+---
+
+## contract.sh
+
+Unit tests for the non-interactive automation contract: exit codes and the
+`status-json` schema. Sources `.Makefile.sh` as a library and stubs every
+function that touches Docker or the network, so it needs no daemon, no images
+and no chain, and finishes in under a second.
+
+    bash test/contract.sh
+
+Requires `jq` on PATH for the `status-json` assertions. Run it after any change
+to `cmd_start`, `cmd_stop`, `cmd_build`, `cmd_update`, `ensure_images` or
+`cmd_status_json` — those are the functions whose return values are now a
+published interface. The suite prints a `passed: N  failed: 0` count; N grows
+as assertions are added, so don't pin a specific number when citing it.

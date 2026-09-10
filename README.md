@@ -258,6 +258,66 @@ Sentinel's format is defined upstream. See [gno-watchtower → Sentinel config](
 
 Downloaded tools (gonzo, jq) live under `.tools/bin/` (gitignored, auto-fetched on first use). Gonzo's config lives at `.tools/gonzo.yml` (tracked).
 
+### Automation contract
+
+Every lifecycle target is safe to run from a non-interactive session (CI,
+Ansible) provided the flags below are passed. Prompts are the only thing that
+can block, and each one names the flag that skips it.
+
+| Target | Non-interactive form |
+| ------ | -------------------- |
+| `start`, `stop`, `restart`, `build` | no flag needed — these never prompt |
+| `update` | `make update force=1` |
+| `reset` | `make reset yes=1` — **not** for automation; see below |
+| `clean-imgs` | `make clean-imgs yes=1` |
+
+Exit codes:
+
+| Code | Meaning |
+| ---- | ------- |
+| 0 | changed — the command did something |
+| 1 | error |
+| 2 | usage error (unknown command, bad `watch=`) |
+| 3 | unchanged — already in the requested state |
+
+`start`, `stop`, `build` and `update` return 3 rather than 0 when there was
+nothing to do, so a caller can report *ok* versus *changed* without parsing
+output. From Ansible:
+
+```yaml
+- name: Start the validator stack
+  ansible.builtin.command:
+    cmd: make start
+    chdir: "{{ gno_validator_dir }}"
+  register: gv_start
+  changed_when: gv_start.rc == 0
+  failed_when: gv_start.rc not in [0, 3]
+```
+
+`make status-json` is a read-only query, not a lifecycle action, so the
+changed/unchanged split above doesn't apply to it: it exits 0 whenever it
+could produce the JSON object (regardless of whether the node is healthy —
+health lives in the JSON body, not the exit code) and 1 only if `jq` is
+unavailable and auto-install fails. It never returns 3. It emits one flat
+JSON object for health checks. Every key is always present; when the RPC is
+unreachable, `rpc_reachable` is `false`, `height` and `peers` are `0`,
+`catching_up` is `true` (the conservative reading — treat an unreachable
+node as not caught up), and the string fields are empty. When the RPC is
+reachable, `catching_up` reports the node's real sync state, so a genuinely
+caught-up node reports `false`.
+
+```json
+{"containers":"running","gnoland":"running","sentinel":"running","rpc_reachable":true,
+ "height":12345,"catching_up":false,"peers":8,"voting_power":"1000",
+ "moniker":"sentry1","network":"gno-mainnet"}
+```
+
+`containers` is one of `none`, `stopped`, `running`, `mixed`, `restarting`.
+
+**`reset` is deliberately excluded from automation.** It wipes chain state and
+clears double-sign protection. It takes `yes=1` for a human in a script, but no
+orchestrator should ever call it; keep it a deliberate, on-host action.
+
 ## Architecture
 
 - **gnoland** exposes RPC (`GNOLAND_RPC_PORT`, default `26657`) and P2P (`GNOLAND_P2P_PORT`, default `26656`) to the host. When `GNOLAND_NTP_UPDATE` is set (default), the container syncs its clock before launching gnoland, trying `ntpd`, then `rdate`, then an HTTPS `Date` header until one succeeds. The container has `CAP_SYS_TIME`, so on a Linux host this also updates the host's clock — disable `GNOLAND_NTP_UPDATE` if another NTP daemon already manages the host.
