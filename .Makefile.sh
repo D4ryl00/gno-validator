@@ -35,6 +35,17 @@ GENESIS_FILE="genesis.json"
 COMPOSE_FILE="docker-compose.yml"
 APPLIED_OVERRIDES_FILE="gnoland-data/.applied-overrides.sha256"
 
+# ---- Exit codes
+# The automation contract consumed by Ansible (see the infra repo's gno design
+# doc, §13.1). Callers distinguish "already in the requested state" from "did
+# something" without parsing prose, so a converge can report ok vs changed.
+# 2 is left to the dispatcher's usage errors, which predate this contract.
+RC_OK=0
+RC_ERR=1
+RC_USAGE=2
+RC_UNCHANGED=3
+readonly RC_OK RC_ERR RC_USAGE RC_UNCHANGED
+
 TMKMS_IMAGE="gno-validator-tmkms"
 GNOLAND_IMAGE="gno-validator-gnoland"
 TMKMS_DATA="tmkms-data"
@@ -1457,7 +1468,7 @@ cmd_start() {
     echo "Containers already running."
     drift_analyze
     drift_warn
-    return 0
+    return "$RC_UNCHANGED"
     ;;
   none)
     # First run — build if needed, then fresh up.
