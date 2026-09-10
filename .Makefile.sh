@@ -274,7 +274,7 @@ preflight() {
       ;;
     tmkms_key)
       # Only required in local (unix://) tmkms mode. In off/remote mode the
-      # signing key lives elsewhere (local file signer / remote tmkms host).
+      # signing key lives elsewhere (local file signer / remote signer host).
       if [[ "$(tmkms_mode)" == "local" ]]; then
         check_consensus_key || {
           err_consensus_key_missing
@@ -1098,6 +1098,47 @@ _ensure_gnoland_secrets() {
   gnoland_run gnoland secrets init >/dev/null 2>&1 || true
 }
 
+# Print the node's privval-listener connection pubkey as 64 lowercase hex chars.
+#
+# On a tcp:// listener gnoland authenticates itself to the signer with its node
+# key (node.go passes nodeKey.PrivKey to NewPrivValidatorFromConfig), so this is
+# the value a signer pins to be sure it is talking to *this* node — horcrux's
+# `chainNodes[].connPubKey`. tmkms pins the node differently, by peer ID in its
+# `addr = tcp://<peer-id>@host:port`, which _print_validator_identity already
+# prints; both identify the same key, in different encodings.
+#
+# `gnoland secrets get node_id.pub_key` can't be used: it returns bech32
+# (gpub1…), and the signers want raw hex. So read node_key.json directly, inside
+# a throwaway gnoland container (alpine busybox: base64/tail/od). The file is
+# amino JSON; PrivKey is a concrete [64]byte field, so it serializes as a bare
+# base64 string — but accept the {"type","value"} shape too, so a future amino
+# change doesn't silently yield an empty pubkey. The last 32 bytes of an ed25519
+# private key are the public key (see NodeKey.validate: `nk.PrivKey[32:]`).
+#
+# Prints nothing and returns non-zero if the key is missing or unparseable;
+# callers render that as "(unavailable)".
+_node_conn_pubkey_hex() {
+  docker run --rm \
+    --user "${HOST_UID}:${HOST_GID}" \
+    --entrypoint sh \
+    -v "${PROJECT_ROOT}/${GNOLAND_DATA}:/gnoland-data" \
+    "$GNOLAND_IMAGE" -c '
+      set -e
+      key=/gnoland-data/secrets/node_key.json
+      [ -f "$key" ] || exit 1
+      raw=$(tr -d " \t\n\r" < "$key")
+      case "$raw" in
+        *\"priv_key\":\{*) b64=${raw#*\"priv_key\":\{}; b64=${b64#*\"value\":\"}; b64=${b64%%\"*} ;;
+        *\"priv_key\":\"*)  b64=${raw#*\"priv_key\":\"};                      b64=${b64%%\"*} ;;
+        *) exit 1 ;;
+      esac
+      [ -n "$b64" ] || exit 1
+      hex=$(printf "%s" "$b64" | base64 -d | tail -c 32 | od -An -v -tx1 | tr -d " \n")
+      [ ${#hex} -eq 64 ] || exit 1
+      printf "%s" "$hex"
+    ' 2>/dev/null
+}
+
 _print_validator_identity() {
   local addr pub node_id
   addr="$(gnoland_run gnoland secrets get validator_key.address --raw 2>/dev/null || true)"
@@ -1155,26 +1196,40 @@ cmd_gen_identity() {
     _print_validator_identity
     echo ""
     echo "Next: register the validator pub_key in genesis.json, then run 'make start'."
-    echo "      (softsign keeps the key on disk — dev/lab only; use a remote tmkms + HSM in production.)"
+    echo "      (softsign keeps the key on disk — dev/lab only; in production use a remote"
+    echo "       signer: tmkms + HSM, or horcrux for threshold signing.)"
     ;;
   remote)
-    # External tmkms on another host holds the consensus key. Nothing to generate
-    # here — surface what the operator must exchange with the signer host.
-    echo "Signer mode: remote tmkms (external host)."
+    # An external signer (tmkms or horcrux) on another host holds the consensus
+    # key. Nothing to generate here — surface what the operator must exchange
+    # with the signer host.
+    echo "Signer mode: remote signer (external host: tmkms or horcrux)."
     _ensure_gnoland_secrets
-    local node_id chain_id listen_addr
+    local node_id conn_pubkey chain_id listen_addr
     node_id="$(gnoland_run gnoland secrets get node_id.id --raw 2>/dev/null || true)"
+    conn_pubkey="$(_node_conn_pubkey_hex || true)"
     chain_id="$(_override_value consensus.priv_validator.tmkms_listener.chain_id)"
     listen_addr="$(_override_value consensus.priv_validator.tmkms_listener.listen_addr)"
     echo ""
-    echo "The consensus key lives on the tmkms host. Give its operator:"
-    echo "  node peer ID: ${node_id:-(unavailable)}   # pin in tmkms.toml addr: tcp://<peer-id>@<host>:26659"
-    echo "  chain_id:     ${chain_id:-(set in config.overrides)}"
-    echo "  listen_addr:  ${listen_addr:-(set in config.overrides)}"
+    echo "The consensus key lives on the signer host. Give its operator:"
+    echo "  chain_id:          ${chain_id:-(set in config.overrides)}"
+    echo "  listen_addr:       ${listen_addr:-(set in config.overrides)}"
     echo ""
-    echo "In return, paste their tmkms identity pubkey into config.overrides:"
-    echo "  consensus.priv_validator.tmkms_listener.allowed_kms_pubkeys = \"ed25519:<their-pubkey>\""
-    echo "Register the validator's consensus pub_key (from the tmkms host) in genesis.json, then run 'make start'."
+    echo "  This node's identity — the signer pins ONE of these, per signer:"
+    echo "    node peer ID:    ${node_id:-(unavailable)}"
+    echo "                     # tmkms:   addr = \"tcp://<peer-id>@<host>:26659\""
+    echo "    node conn pubkey: ${conn_pubkey:-(unavailable)}"
+    echo "                     # horcrux: chainNodes[].connPubKey"
+    echo ""
+    echo "In return, paste every signer identity pubkey into config.overrides"
+    echo "(one per tmkms instance, or one per horcrux cosigner — comma-separated):"
+    echo "  consensus.priv_validator.tmkms_listener.allowed_kms_pubkeys = \"<pubkey1>,<pubkey2>,...\""
+    echo ""
+    echo "Note for horcrux: each cosigner needs a persistent connKeyFile"
+    echo "('horcrux create-conn-key'). Without one it dials with a fresh identity"
+    echo "every start, which can never match the allowlist gnoland requires here."
+    echo ""
+    echo "Register the validator's consensus pub_key (from the signer host) in genesis.json, then run 'make start'."
     ;;
   esac
 }
@@ -1247,7 +1302,7 @@ cmd_infos() {
   local signer_mode
   case "$(tmkms_mode)" in
   local) signer_mode="local bundled tmkms (softsign)" ;;
-  remote) signer_mode="remote tmkms (external host)" ;;
+  remote) signer_mode="remote signer, external host (tmkms or horcrux)" ;;
   *) signer_mode="local file signer" ;;
   esac
   printf '%-18s %s\n' "signer:" "$signer_mode"
@@ -1815,9 +1870,11 @@ cmd_reset() {
   fi
   echo "Reset complete."
   if [[ "$tmkms_md" == "remote" ]]; then
-    echo "Note: this node uses a remote tmkms signer. Its double-sign state lives on the"
-    echo "      signer host and was NOT reset — tmkms will refuse to sign until the chain"
-    echo "      passes its last recorded height. Reset it there if you restarted from genesis."
+    echo "Note: this node uses a remote signer. Its double-sign state lives on the signer"
+    echo "      host and was NOT reset — the signer will refuse to sign until the chain"
+    echo "      passes its last recorded height. Reset it there if you restarted from genesis:"
+    echo "        tmkms:   delete its consensus_state.json (state.path in tmkms.toml)"
+    echo "        horcrux: run 'horcrux state set <chain-id> 0' on EVERY cosigner"
   fi
 
   if ((was_running == 1)); then
