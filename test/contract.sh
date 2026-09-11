@@ -52,6 +52,19 @@ assert_defined confirm
 assert_defined cmd_start
 assert_defined classify_state
 
+echo ""
+echo "== direct invocation =="
+
+# The automation contract is only deliverable through direct invocation (see
+# README.md's "Automation contract" — `make` collapses every non-zero recipe
+# exit to its own generic 2, so it cannot carry the changed/unchanged/error
+# distinction). This pins the entry point itself: run as a real script (not
+# sourced) with no command, exactly as Ansible's docs example does, and it
+# must exit 2 (usage) per its own dispatcher, never abort before printing
+# usage, and never touch Docker to get there.
+bash ./.Makefile.sh >/dev/null 2>&1
+assert_rc 2 $? "bash .Makefile.sh with no command exits 2 (usage), pinning the direct-invocation contract"
+
 # --- Stubs for everything that touches Docker, the network or the clock ------
 preflight() { :; }
 resolve_signer_mode() { :; }
@@ -111,6 +124,10 @@ assert_rc 1 $? "restart with no containers is an error"
 # 2. cmd_stop's classify_state: stopped → returns RC_UNCHANGED (3)
 # 3. cmd_start's classify_state: stopped → returns 0 (changed)
 # The guard must accept RC_UNCHANGED (3) and continue to cmd_start.
+#
+# _CLASSIFY_CALLS lives at file scope and is left set after this block. A
+# later block adding its own call-counting classify_state stub must reset
+# it (_CLASSIFY_CALLS=0) before use, or it will start from this stale count.
 _CLASSIFY_CALLS=0
 classify_state() {
   _CLASSIFY_CALLS=$((_CLASSIFY_CALLS + 1))
@@ -298,6 +315,46 @@ bash -c '
   exit $?
 ' >/dev/null 2>&1
 assert_rc 0 $? "update guard prevents set -e abort when cmd_build returns RC_UNCHANGED"
+
+echo ""
+echo "== reset =="
+
+# Guard: cmd_reset's cmd_stop call site (was_running == 1 branch) must not
+# abort under set -e when cmd_stop returns RC_UNCHANGED — a stack that turns
+# out to already be stopped (raced between the "was it running?" check and
+# the confirm prompts) is not a reason to abandon a reset the operator just
+# confirmed twice. This cannot be tested in the harness body above for the
+# same reason noted at "== ensure_images ==": it runs under `set +e`, so
+# there is no abort to prevent there. Keep set -e genuinely active in a
+# subshell, and run cmd_reset against a throwaway temp directory (never the
+# real gnoland-data/tmkms-data) since it performs a destructive `rm -rf`.
+bash -c '
+  set -euo pipefail
+  source ./.Makefile.sh
+
+  tmpd="$(mktemp -d)"
+  trap "rm -rf \"$tmpd\"" EXIT
+  GNOLAND_DATA="$tmpd/gnoland-data"
+  TMKMS_DATA="$tmpd/tmkms-data"
+  mkdir -p "$GNOLAND_DATA/db" "$GNOLAND_DATA/secrets"
+  echo "chain-data" >"$GNOLAND_DATA/db/dummy"
+
+  preflight() { :; }
+  signer_mode() { echo "remote"; }
+  check_docker() { return 0; }
+  classify_state() { STATE_GNOLAND="running"; STATE_TMKMS="absent"; }
+  cmd_stop() { return "$RC_UNCHANGED"; } # simulate "already stopped"
+  cmd_start() { return 0; }
+
+  YES=1 cmd_reset >/dev/null 2>&1
+  rc=$?
+  # Prove the reset actually ran (not just that the rc looks right): the
+  # guard existing but the rm -rf being skipped for some other reason would
+  # still report rc 0 here without this check.
+  [[ ! -d "$GNOLAND_DATA/db" ]] || exit 9
+  exit "$rc"
+' >/dev/null 2>&1
+assert_rc 0 $? "reset guard prevents set -e abort when cmd_stop returns RC_UNCHANGED, and the reset still completes"
 
 echo ""
 echo "== status-json =="
