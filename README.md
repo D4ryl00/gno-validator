@@ -260,18 +260,51 @@ Downloaded tools (gonzo, jq) live under `.tools/bin/` (gitignored, auto-fetched 
 
 ### Automation contract
 
-Every lifecycle target is safe to run from a non-interactive session (CI,
+Every lifecycle command is safe to run from a non-interactive session (CI,
 Ansible) provided the flags below are passed. Prompts are the only thing that
 can block, and each one names the flag that skips it.
 
-| Target | Non-interactive form |
-| ------ | -------------------- |
-| `start`, `stop`, `restart`, `build` | no flag needed — these never prompt |
-| `update` | `make update force=1` |
-| `reset` | `make reset yes=1` — **not** for automation; see below |
-| `clean-imgs` | `make clean-imgs yes=1` |
+**Call `.Makefile.sh` directly, not through `make`.** `make` is the human
+entry point; it is unaffected by any of this because humans only care about
+success versus failure. Automation needs the finer-grained exit codes below,
+and those cannot survive `make`: GNU Make collapses *every* non-zero recipe
+exit status to its own generic exit code 2, discarding the original value.
+Measured directly (GNU Make 3.81):
 
-Exit codes:
+| Recipe exit | `make` exit |
+| ----------- | ----------- |
+| 0 | 0 |
+| 1 | 2 |
+| 3 | 2 |
+| 3, recipe line prefixed with `-` | 0 |
+
+So through `make`, "unchanged" (3) and "error" (1) both arrive as 2 —
+indistinguishable — and a `-`-prefixed recipe (told to ignore errors) instead
+makes everything look like success. There is no `make` flag or recipe idiom
+that forwards an arbitrary exit status as `make`'s own, so **do not** try to
+route this contract through `make start`/`make update`/etc.; call the script
+`.Makefile.sh` blesses for this in its own header comment:
+
+    bash .Makefile.sh <command>
+
+The exit-code table and the rest of this section describe `.Makefile.sh
+<command>` run this way — **not** `make <target>`.
+
+| Command | Non-interactive form |
+| ------- | --------------------- |
+| `start`, `stop`, `restart`, `build` | no flag needed — these never prompt |
+| `update` | `FORCE=1 bash .Makefile.sh update` |
+| `reset` | `YES=1 bash .Makefile.sh reset` — **not** for automation; see below |
+| `clean-imgs` | `YES=1 bash .Makefile.sh clean-imgs` |
+
+(`make update force=1`, `make reset yes=1`, etc. are the equivalent *human*,
+through-`make` forms — see the target list at the top of this file. `make`
+turns `force=1`/`yes=1`/`all=1`/`watch=N`/`since=D` arguments into the
+`FORCE`/`YES`/`ALL`/`WATCH`/`SINCE` environment variables `.Makefile.sh`
+actually reads, so calling the script directly means setting those variables
+yourself, as shown above.)
+
+Exit codes (`.Makefile.sh <command>`, invoked directly as above):
 
 | Code | Meaning |
 | ---- | ------- |
@@ -287,14 +320,15 @@ output. From Ansible:
 ```yaml
 - name: Start the validator stack
   ansible.builtin.command:
-    cmd: make start
+    cmd: bash .Makefile.sh start
     chdir: "{{ gno_validator_dir }}"
   register: gv_start
   changed_when: gv_start.rc == 0
   failed_when: gv_start.rc not in [0, 3]
 ```
 
-`make status-json` is a read-only query, not a lifecycle action, so the
+`bash .Makefile.sh status-json` (or `make status-json` for a human) is a
+read-only query, not a lifecycle action, so the
 changed/unchanged split above doesn't apply to it: it exits 0 whenever it
 could produce the JSON object (regardless of whether the node is healthy —
 health lives in the JSON body, not the exit code) and 1 only if `jq` is
@@ -315,8 +349,9 @@ caught-up node reports `false`.
 `containers` is one of `none`, `stopped`, `running`, `mixed`, `restarting`.
 
 **`reset` is deliberately excluded from automation.** It wipes chain state and
-clears double-sign protection. It takes `yes=1` for a human in a script, but no
-orchestrator should ever call it; keep it a deliberate, on-host action.
+clears double-sign protection. It takes `YES=1`/`yes=1` for a human running it
+by hand, but no orchestrator should ever call it — keep it a deliberate,
+on-host action.
 
 ## Architecture
 
