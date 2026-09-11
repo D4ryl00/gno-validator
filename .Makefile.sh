@@ -1930,7 +1930,16 @@ cmd_reset() {
   fi
 
   if ((was_running == 1)); then
-    cmd_stop
+    # cmd_stop may return RC_UNCHANGED, which set -e would treat as fatal in
+    # plain statement position. Capture it: the operator already confirmed
+    # the reset twice above, and a stack that turns out to already be
+    # stopped (raced by a crash or another session) is not a reason to
+    # abandon a reset they explicitly asked for.
+    local reset_stop_rc=0
+    cmd_stop || reset_stop_rc=$?
+    if ((reset_stop_rc != RC_OK && reset_stop_rc != RC_UNCHANGED)); then
+      return "$reset_stop_rc"
+    fi
   fi
 
   echo "Resetting..."
