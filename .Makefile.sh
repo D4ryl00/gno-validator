@@ -372,6 +372,18 @@ gnoland_run() {
   docker run "${args[@]}" "$GNOLAND_IMAGE" "$@"
 }
 
+# Print the version string compiled into the gnoland binary
+# (tm2/pkg/version.Version, set by the Dockerfile's ldflag). This is the string
+# a governance halt_min_version is compared against — not the ref that was
+# built, which the gno.version label already reports.
+gnoland_binary_version() {
+  local out
+  out="$(gnoland_run gnoland version)" || return 1
+  # "gnoland version: <v>" today. Taking the last field means a wording change
+  # upstream degrades to still printing the version, not to printing nothing.
+  printf '%s\n' "${out##* }"
+}
+
 # Print a Docker image label (empty if missing or image absent).
 image_label() {
   docker inspect --format "{{index .Config.Labels \"$2\"}}" "$1" 2>/dev/null || true
@@ -1354,6 +1366,10 @@ cmd_infos() {
   _infos_field "gno repo" "$label_reason" image_label "$GNOLAND_IMAGE" gno.repo
   _infos_field "gno version" "$label_reason" image_label "$GNOLAND_IMAGE" gno.version
   _infos_field "gno commit" "$label_reason" image_label "$GNOLAND_IMAGE" gno.commit
+  # What the binary itself reports, which is what an upgrade gate reads. Only a
+  # v<X.Y.Z> release tag parses as a version: "develop" or "<ref>.<N>+<sha>"
+  # satisfies no halt_min_version and is refused at a coordinated halt.
+  _infos_field "binary version" "$node_reason" gnoland_binary_version
   local sentinel_reason="sentinel image not pulled — run 'make start' or 'make update'"
   _infos_field "sentinel image" "$sentinel_reason" sentinel_image_ref
   _infos_field_trunc "sentinel digest" "$sentinel_reason" 19 sentinel_local_digest

@@ -143,7 +143,7 @@ make status watch=5      # live status table (height, peers, VP) refreshing ever
 
 | Variable              | Default                           | Meaning                                                                                                                                                                                                                                           |
 | --------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GNO_VERSION`         | `master`                          | Branch, tag, or commit hash of `gnolang/gno` to build.                                                                                                                                                                                            |
+| `GNO_VERSION`         | `master`                          | Branch, tag, or commit hash of `gnolang/gno` to build. For a node that must survive a coordinated halt, this has to resolve to a commit carrying a `v<X.Y.Z>` release tag — see [Version stamping and coordinated upgrades](#version-stamping-and-coordinated-upgrades). |
 | `GNO_REPO`            | `gnolang/gno`                     | GitHub repo slug to clone gno sources from.                                                                                                                                                                                                       |
 | `SENTINEL_IMAGE_TAG`  | `latest`                          | Tag or digest for the sentinel image pulled from `ghcr.io/aeddi/gno-watchtower/sentinel`. Pin a digest (`sha256:...`) for reproducibility; drift is reported when a tag like `latest` advances on the registry.                                   |
 | `GNOLAND_RPC_LADDR`   | `0.0.0.0`                         | Host interface gnoland RPC binds to. Use `127.0.0.1` when exposing RPC only via a reverse proxy.                                                                                                                                                  |
@@ -219,6 +219,35 @@ Sentinel's format is defined upstream. See [gno-watchtower → Sentinel config](
 | Command                | What it does                                                                                                                                                                                                          |
 | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `make build [force=1]` | Builds images when `.build-state` doesn't match the current inputs (gno commit, `Dockerfile`, entrypoints) or the tagged images are missing. `force=1` rebuilds anyway. `start` and `update` call this automatically. |
+
+### Version stamping and coordinated upgrades
+
+The build compiles a version string into `gnoland` (`tm2/pkg/version.Version`).
+It is derived in the builder stage as `git describe --tags --exact-match --match
+'v*'`, falling back to an unparseable `<GNO_VERSION>.<N>+<sha>` when the checked
+out commit carries no release tag.
+
+That string is what a GovDAO halt proposal's `halt_min_version` is compared
+against. After a halt, `gnoland` refuses to start unless its own version meets
+that floor, and only two shapes parse: `v<X.Y.Z>`, and betanet's retired
+`chain/gnoland<M>.<m>`. Anything else — `develop`, `master.3426+31b6650a1`, or a
+bare `chain/<name>` tag — meets no floor at all and is refused. So:
+
+- Building from an arbitrary commit is fine day to day, and fine for a halt
+  whose proposal leaves `halt_min_version` empty.
+- For a halt with a real version floor, point `GNO_VERSION` (or
+  `GNO_COMMIT_HASH`) at the commit the `v<X.Y.Z>` tag names. The `--match 'v*'`
+  filter matters: a release commit usually carries a `chain/<name>` tag as well,
+  and an unfiltered `git describe --exact-match` chooses between them by git's
+  own ordering — it can answer the `chain/` one, which does not parse.
+- Check what you actually built with `make infos` (`binary version`), or
+  directly:
+
+      docker run --rm gno-validator-gnoland gnoland version
+
+If a node is already stuck behind a floor it cannot meet, `skip_upgrade_height`
+in `config.overrides` (set to the halt height) bypasses the check for that one
+restart.
 
 ### Inspection
 

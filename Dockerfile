@@ -14,7 +14,32 @@ RUN     git clone https://github.com/${GNO_REPO}.git /gnoroot && \
 
 WORKDIR /gnoroot
 
-RUN     go build -o /usr/local/bin/gnoland ./gno.land/cmd/gnoland
+# Stamp the release version into the binary. `gnoland version` reports
+# tm2/pkg/version.Version, which defaults to "develop" and is only ever set by
+# this ldflag, so a plain `go build` yields a binary that parses as no version
+# at all. Since gno#6177 that is not cosmetic: after a governance halt,
+# gno.land/pkg/gnoland.checkNodeStartupParams refuses to start any binary that
+# does not meet the proposal's halt_min_version, and an unparseable version
+# meets no floor. An unstamped node restarts only if the proposal left
+# halt_min_version empty — otherwise it stays down exactly when the chain needs
+# its vote back.
+#
+# --match 'v*' is load-bearing: a release commit carries both chain/<name> and
+# v<X.Y.Z>, and an unfiltered describe answers the chain/ one, which
+# parseReleaseVersion refuses. So a gate-satisfying binary means pointing
+# GNO_COMMIT_HASH at the commit a v<X.Y.Z> tag names; any other commit builds
+# and runs fine, and is refused at the halt.
+#
+# The fallback is unparseable on purpose (an off-tag build must not satisfy an
+# upgrade gate) and mirrors the [ref].[N]+[hash] shape of gno.land/Makefile.
+# It names GNO_VERSION rather than the branch, because the checkout above is
+# detached whenever GNO_COMMIT_HASH is set and `git rev-parse --abbrev-ref HEAD`
+# would then say only "HEAD".
+RUN     VERSION="$(git describe --tags --exact-match --match 'v*' 2>/dev/null \
+    || echo "${GNO_VERSION}.$(git rev-list --count HEAD)+$(git rev-parse --short HEAD)")" && \
+  echo "building gnoland with version=${VERSION}" && \
+  go build -ldflags "-X github.com/gnolang/gno/tm2/pkg/version.Version=${VERSION}" \
+    -o /usr/local/bin/gnoland ./gno.land/cmd/gnoland
 
 # ----- gnoland final stage
 FROM    alpine:3 AS gnoland
