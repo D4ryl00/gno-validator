@@ -1,0 +1,25 @@
+# Image-mode overlay — layered on docker-compose.yml when validator.env names
+# GNOLAND_IMAGE_REF (see _compose_file_args in .Makefile.sh).
+#
+# The gnoland image is pulled rather than built here, and it is tagged locally
+# as gno-validator-gnoland by the pull, so the base file's `image:` and its
+# whole service definition still apply. Two things do not, and both are
+# corrected here:
+#
+#   entrypoint   the published image's ENTRYPOINT is the bare /usr/bin/gnoland.
+#                Ours initialises the node and applies config.overrides before
+#                starting it, so it is mounted in and selected explicitly. It
+#                is a bind mount, not a rebuild: editing the script takes
+#                effect on the next start.
+#
+#   working_dir  the published image sets WORKDIR /gnoroot, and gnoland's
+#                default data dir is RELATIVE ("gnoland-data/config/..."), so
+#                without this the node would write its chain data to
+#                /gnoroot/gnoland-data — off the ./gnoland-data bind mount,
+#                i.e. inside the container, lost on every recreate.
+services:
+  gnoland:
+    entrypoint: /entrypoint.sh
+    working_dir: /
+    volumes:
+      - ./docker/gnoland-entrypoint.sh:/entrypoint.sh:ro

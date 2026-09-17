@@ -143,6 +143,7 @@ make status watch=5      # live status table (height, peers, VP) refreshing ever
 
 | Variable              | Default                           | Meaning                                                                                                                                                                                                                                           |
 | --------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GNOLAND_IMAGE_REF`   | _(unset)_                         | Published gnoland image to run instead of building one, e.g. `ghcr.io/gnolang/gno/gnoland:sha-00417a1`. Mutually exclusive with `GNO_VERSION` / `GNO_REPO` / `GNO_COMMIT_HASH` — see [Build from source, or run a published image](#build-from-source-or-run-a-published-image). |
 | `GNO_VERSION`         | `master`                          | Branch, tag, or commit hash of `gnolang/gno` to build. For a node that must survive a coordinated halt, this has to resolve to a commit carrying a `v<X.Y.Z>` release tag — see [Version stamping and coordinated upgrades](#version-stamping-and-coordinated-upgrades). |
 | `GNO_REPO`            | `gnolang/gno`                     | GitHub repo slug to clone gno sources from.                                                                                                                                                                                                       |
 | `SENTINEL_IMAGE_TAG`  | `latest`                          | Tag or digest for the sentinel image pulled from `ghcr.io/aeddi/gno-watchtower/sentinel`. Pin a digest (`sha256:...`) for reproducibility; drift is reported when a tag like `latest` advances on the registry.                                   |
@@ -220,12 +221,48 @@ Sentinel's format is defined upstream. See [gno-watchtower → Sentinel config](
 | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `make build [force=1]` | Builds images when `.build-state` doesn't match the current inputs (gno commit, `Dockerfile`, entrypoints) or the tagged images are missing. `force=1` rebuilds anyway. `start` and `update` call this automatically. |
 
+### Build from source, or run a published image
+
+The gnoland binary can come from either place, and `validator.env` picks which:
+
+| | key | what happens |
+|---|---|---|
+| **build** (default) | `GNO_VERSION` / `GNO_REPO` | the image is compiled here from gno source |
+| **image** | `GNOLAND_IMAGE_REF` | the named image is pulled and run as-is |
+
+Setting keys from both is refused by every command, before Docker is touched:
+the binary that ended up running would otherwise depend on which code path
+resolved it first. Comment out one block in `validator.env`.
+
+Image mode changes nothing else. The pulled image is tagged locally as
+`gno-validator-gnoland`, so `make status`, `make infos`, `make update` and the
+rest behave exactly as before, and `config.overrides` is still applied on every
+start — the entrypoint that does it is mounted into the published image, whose
+own entrypoint is the bare binary.
+
+**Pinning.** Prefer an immutable ref: a `sha-<short>` tag, or `…@sha256:<digest>`
+to be certain (a `sha-` tag is immutable by convention, not by the registry — a
+re-run of the publishing workflow can overwrite it). A moving tag such as
+`:chain-mainnet` is accepted and handled safely: the digest it resolved to at
+the last pull is recorded in `.build-state` and is what the container is started
+from afterwards, so a tag that moves between staging an upgrade and restarting
+into it cannot swap the binary underneath. What a moving tag cannot give you is
+two nodes provably on the same code — pull them a day apart and they differ.
+`make status` reports the tag advancing as drift either way.
+
+**What you give up.** You no longer control, or can verify, how the binary was
+produced; that is upstream CI's business now, which is the point. And `make
+build` needs the registry reachable, so stage an upgrade well before you need
+it rather than during the window.
+
 ### Version stamping and coordinated upgrades
 
-The build compiles a version string into `gnoland` (`tm2/pkg/version.Version`).
-It is derived in the builder stage as `git describe --tags --exact-match --match
-'v*'`, falling back to an unparseable `<GNO_VERSION>.<N>+<sha>` when the checked
-out commit carries no release tag.
+In build mode, the build compiles a version string into `gnoland`
+(`tm2/pkg/version.Version`). It is derived in the builder stage as `git describe
+--tags --exact-match --match 'v*'`, falling back to an unparseable
+`<GNO_VERSION>.<N>+<sha>` when the checked out commit carries no release tag. In
+image mode the published image carries whatever version upstream CI stamped —
+the same rules apply to it, and the same check below reads it.
 
 That string is what a GovDAO halt proposal's `halt_min_version` is compared
 against. After a halt, `gnoland` refuses to start unless its own version meets
@@ -240,8 +277,8 @@ bare `chain/<name>` tag — meets no floor at all and is refused. So:
   filter matters: a release commit usually carries a `chain/<name>` tag as well,
   and an unfiltered `git describe --exact-match` chooses between them by git's
   own ordering — it can answer the `chain/` one, which does not parse.
-- Check what you actually built with `make infos` (`binary version`), or
-  directly:
+- Check what you actually got with `make infos` (`binary version`, and in image
+  mode the `gnoland image` / `image digest` fields), or directly:
 
       docker run --rm gno-validator-gnoland gnoland version
 

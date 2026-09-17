@@ -33,6 +33,8 @@ STATE_FILE=".build-state"
 OVERRIDES_FILE="config.overrides"
 GENESIS_FILE="genesis.json"
 COMPOSE_FILE="docker-compose.yml"
+# Layered on COMPOSE_FILE in image mode only (see _compose_file_args).
+COMPOSE_IMAGE_FILE="docker-compose.image.yml"
 APPLIED_OVERRIDES_FILE="gnoland-data/.applied-overrides.sha256"
 
 # ---- Exit codes
@@ -60,6 +62,12 @@ SENTINEL_CONTAINER="gno-validator-sentinel-1"
 # _compose / _compose_noenv call includes it so the bundled tmkms service is
 # created/stopped/logged only in local mode.
 _COMPOSE_PROFILES=()
+
+# Filled by _set_compose_file_args / _set_gnoland_run_image_args below. Both are
+# arrays rather than printed lines because `mapfile` is bash 4+ and macOS ships
+# bash 3.2 — the same reason noted at the ${var^^} comment further down.
+_COMPOSE_FILE_ARGS=()
+_GNOLAND_RUN_IMAGE_ARGS=()
 
 GONZO_VERSION="0.3.2"
 JQ_VERSION="1.7.1"
@@ -114,6 +122,23 @@ err_build_failed() {
   return 1
 }
 
+err_gno_source_conflict() {
+  echo "Error: validator.env sets GNOLAND_IMAGE_REF together with a build ref" >&2
+  echo "       (GNO_VERSION / GNO_REPO / GNO_COMMIT_HASH)." >&2
+  echo "       These select two different ways of obtaining the gnoland binary:" >&2
+  echo "         GNOLAND_IMAGE_REF   pull a prebuilt image from a registry" >&2
+  echo "         GNO_VERSION & co.   build it here from gno source" >&2
+  echo "       Keep exactly one. Comment out or delete the other." >&2
+  return 1
+}
+
+err_gnoland_pull_failed() {
+  echo "Error: could not pull the gnoland image. See output above." >&2
+  echo "       Likely causes: network offline, the registry is unreachable, or" >&2
+  echo "       GNOLAND_IMAGE_REF names a tag or digest that does not exist." >&2
+  return 1
+}
+
 err_no_containers_for_restart() {
   echo "Error: no containers to restart. Run 'make start' first." >&2
   return 1
@@ -124,12 +149,30 @@ err_no_containers_for_restart() {
 # interpolation (stop, logs) use _compose_noenv so a missing validator.env
 # doesn't block log viewing or container stops.
 
+# The compose file set. Image mode layers an overlay that corrects the two
+# things a prebuilt gnoland image gets differently from the one built here: its
+# entrypoint is the bare binary (ours does the config-overrides init), and its
+# WORKDIR is /gnoroot, which would move gnoland's RELATIVE default data dir
+# (gnoland-data/...) off the ./gnoland-data bind mount.
+#
+# Both wrappers use the same set: compose resolves a project from the files it
+# is given, so stopping with a different set than starting used is how orphaned
+# containers and confusing diffs appear.
+_set_compose_file_args() {
+  _COMPOSE_FILE_ARGS=(-f "$COMPOSE_FILE")
+  if [[ "$(gnoland_source_mode)" == "image" ]]; then
+    _COMPOSE_FILE_ARGS+=(-f "$COMPOSE_IMAGE_FILE")
+  fi
+}
+
 _compose() {
-  docker compose --env-file "$ENV_FILE" "${_COMPOSE_PROFILES[@]+"${_COMPOSE_PROFILES[@]}"}" "$@"
+  _set_compose_file_args
+  docker compose "${_COMPOSE_FILE_ARGS[@]}" --env-file "$ENV_FILE" "${_COMPOSE_PROFILES[@]+"${_COMPOSE_PROFILES[@]}"}" "$@"
 }
 
 _compose_noenv() {
-  docker compose "${_COMPOSE_PROFILES[@]+"${_COMPOSE_PROFILES[@]}"}" "$@"
+  _set_compose_file_args
+  docker compose "${_COMPOSE_FILE_ARGS[@]}" "${_COMPOSE_PROFILES[@]+"${_COMPOSE_PROFILES[@]}"}" "$@"
 }
 
 # ---- signer mode resolution
@@ -174,6 +217,72 @@ signer_mode() {
   tcp://*) echo remote ;;
   *) echo off ;;
   esac
+}
+
+# Where the gnoland binary comes from: 'image' when validator.env names a
+# prebuilt registry image, 'build' when it is compiled here from gno source.
+# Shaped like signer_mode above — one function, read wherever the answer is
+# needed, so no caller has to know which validator.env keys encode it.
+gnoland_source_mode() {
+  if env_has_value GNOLAND_IMAGE_REF; then
+    echo image
+  else
+    echo build
+  fi
+}
+
+# The two sources are mutually exclusive. Leaving both configured would mean
+# the binary that runs depends on which code path happened to resolve it —
+# the build args say one thing, the image ref another — so refuse up front
+# rather than let an operator find out from a running node.
+check_gno_source() {
+  env_has_value GNOLAND_IMAGE_REF || return 0
+  local key
+  for key in GNO_VERSION GNO_REPO GNO_COMMIT_HASH; do
+    if env_has_value "$key"; then
+      return 1
+    fi
+  done
+  return 0
+}
+
+# The gnoland image ref exactly as validator.env names it. Empty in build mode.
+gnoland_image_ref() {
+  env_get GNOLAND_IMAGE_REF
+}
+
+# The ref with a digest attached — what actually runs in image mode.
+#
+# A ref the operator already pinned is returned untouched. Otherwise the digest
+# recorded at the last pull is appended, which is what keeps `prebuild` and the
+# later `recreate` on the same bytes: a tag that moves in between cannot swap
+# the binary underneath, because the tag is no longer what the container is
+# started from. Before the first pull there is nothing to pin to, so the bare
+# ref is returned and the pull resolves it.
+#
+# A digest recorded against a DIFFERENT ref is ignored: the operator repointing
+# the ref is exactly the moment a stale pin would be wrong.
+gnoland_pinned_ref() {
+  local ref
+  ref="$(gnoland_image_ref)"
+  case "$ref" in
+  *@sha256:*)
+    printf '%s\n' "$ref"
+    return 0
+    ;;
+  esac
+
+  # Declared local so the eval below cannot leak PREV_* into the caller.
+  local PREV_GNOLAND_IMAGE_REF="" PREV_GNOLAND_IMAGE_DIGEST=""
+  local prev_state
+  if prev_state="$(read_build_state_as_prev 2>/dev/null)"; then
+    eval "$prev_state"
+  fi
+  if [[ -n "$PREV_GNOLAND_IMAGE_DIGEST" && "$PREV_GNOLAND_IMAGE_REF" == "$ref" ]]; then
+    printf '%s@%s\n' "$ref" "$PREV_GNOLAND_IMAGE_DIGEST"
+    return 0
+  fi
+  printf '%s\n' "$ref"
 }
 
 # Chain ID for the bundled tmkms container. Derived from config.overrides
@@ -280,6 +389,12 @@ preflight() {
     env_note)
       check_env_note
       ;;
+    gno_source)
+      check_gno_source || {
+        err_gno_source_conflict
+        return 1
+      }
+      ;;
     genesis)
       check_genesis || {
         err_genesis_missing
@@ -313,6 +428,13 @@ preflight() {
 # targets that don't need a commit, e.g. stop/logs).
 resolve_gno_inputs() {
   local skip_commit="${1:-}"
+  # Image mode has no gno source to resolve, and no reason to reach the network
+  # for a commit hash nothing will build. Callers read these three either way,
+  # so answer with empties rather than leaving them unset under `set -u`.
+  if [[ "$(gnoland_source_mode)" == "image" ]]; then
+    export GNO_REPO="" GNO_VERSION="" GNO_COMMIT_HASH=""
+    return 0
+  fi
   local repo version commit
   repo="$(env_get GNO_REPO gnolang/gno)"
   version="$(env_get GNO_VERSION master)"
@@ -352,20 +474,54 @@ resolve_input_hashes() {
   export COMPOSE_FILE_SHA256=""
   [[ -f "$OVERRIDES_FILE" ]] && CONFIG_OVERRIDES_SHA256="$(sha256_of_file "$OVERRIDES_FILE")"
   [[ -f "$ENV_FILE" ]] && VALIDATOR_ENV_SHA256="$(sha256_of_file "$ENV_FILE")"
-  [[ -f "$COMPOSE_FILE" ]] && COMPOSE_FILE_SHA256="$(sha256_of_file "$COMPOSE_FILE")"
+  # In image mode the overlay is as load-bearing as the base file, so an edit
+  # to either has to read as compose drift.
+  if [[ -f "$COMPOSE_FILE" ]]; then
+    COMPOSE_FILE_SHA256="$(sha256_of_file "$COMPOSE_FILE")"
+    if [[ "$(gnoland_source_mode)" == "image" && -f "$COMPOSE_IMAGE_FILE" ]]; then
+      COMPOSE_FILE_SHA256="${COMPOSE_FILE_SHA256}+$(sha256_of_file "$COMPOSE_IMAGE_FILE")"
+    fi
+  fi
 }
 
 # ---- Docker helpers
 
+# The `docker run` arguments that make a PULLED image behave like one built
+# here. The compose overlay applies the same two corrections to the long-lived
+# container; these one-shot runs bypass compose, so they need them too:
+#
+#   --entrypoint  a published image's entrypoint is the bare binary, so
+#                 `gnoland_run gnoland version` would become
+#                 `gnoland gnoland version` and print usage.
+#   -w /          gnoland's default data dir is relative, and the published
+#                 image's WORKDIR is /gnoroot — the run would read and write
+#                 /gnoroot/gnoland-data instead of the mount.
+#
+# Empty in build mode: there the image already carries this entrypoint and
+# working directory, and mounting the checkout's copy over a baked-in one
+# would quietly make two runs of the same image behave differently.
+_set_gnoland_run_image_args() {
+  _GNOLAND_RUN_IMAGE_ARGS=()
+  [[ "$(gnoland_source_mode)" == "image" ]] || return 0
+  _GNOLAND_RUN_IMAGE_ARGS=(
+    --entrypoint /entrypoint.sh
+    -w /
+    -v "${PROJECT_ROOT}/docker/gnoland-entrypoint.sh:/entrypoint.sh:ro"
+  )
+}
+
 # Run the gnoland image once with the data volume, as the host user, and with
-# config.overrides mounted read-only if present. Entry point is the default
-# (gnoland-entrypoint.sh), so passing `gnoland <subcommand>` works as expected.
+# config.overrides mounted read-only if present. The entry point is this repo's
+# gnoland-entrypoint.sh in both source modes, so passing `gnoland <subcommand>`
+# works as expected.
 gnoland_run() {
   local args=(
     --rm
     --user "${HOST_UID}:${HOST_GID}"
     -v "${PROJECT_ROOT}/${GNOLAND_DATA}:/gnoland-data"
   )
+  _set_gnoland_run_image_args
+  args+=("${_GNOLAND_RUN_IMAGE_ARGS[@]+"${_GNOLAND_RUN_IMAGE_ARGS[@]}"}")
   if [[ -f "$OVERRIDES_FILE" ]]; then
     args+=(-v "${PROJECT_ROOT}/${OVERRIDES_FILE}:/config.overrides:ro")
   fi
@@ -531,6 +687,47 @@ sentinel_pull() {
 # Print the sentinel binary's reported version string by running `sentinel
 # version` inside the configured image. Requires the image to be locally
 # present — does not auto-pull to avoid slow surprises inside cmd_infos.
+# The registry digest the gnoland ref currently resolves to. Same mechanics and
+# same caveats as sentinel_remote_digest above — see its comment for why this
+# is `buildx imagetools inspect` and not `docker manifest inspect`.
+gnoland_remote_digest() {
+  local ref digest
+  ref="$(gnoland_image_ref)"
+  [[ -n "$ref" ]] || return 0
+  digest="$(docker buildx imagetools inspect "$ref" 2>/dev/null |
+    awk '/^Digest:/{print $2; exit}')"
+  if [[ -z "$digest" ]]; then
+    if [[ -z "${_GNOLAND_REMOTE_WARNED:-}" ]]; then
+      echo "Note: can't fetch the manifest digest for ${ref} (registry unreachable or 'docker buildx' unavailable); image drift check skipped this run." >&2
+      _GNOLAND_REMOTE_WARNED=1
+    fi
+    return 0
+  fi
+  printf '%s\n' "$digest"
+}
+
+gnoland_local_digest() {
+  local ref
+  ref="$(gnoland_image_ref)"
+  [[ -n "$ref" ]] || return 0
+  docker image inspect --format '{{index .RepoDigests 0}}' "$ref" 2>/dev/null |
+    grep -Eo 'sha256:[a-f0-9]{64}' | head -1 || true
+}
+
+# Fetch the pinned image and tag it under the local gnoland image name.
+#
+# The retag is what keeps image mode invisible to the rest of the script: every
+# `docker image inspect`, `docker run` and compose reference already names
+# $GNOLAND_IMAGE, and they keep working unchanged whether those bytes were
+# built here or pulled.
+gnoland_pull() {
+  local ref
+  ref="$(gnoland_pinned_ref)"
+  echo "Pulling ${ref}..."
+  docker pull "$ref" || return 1
+  docker tag "$ref" "$GNOLAND_IMAGE"
+}
+
 sentinel_version() {
   local ref
   ref="$(sentinel_image_ref)"
@@ -577,8 +774,9 @@ image_tag_for() {
 write_build_state() {
   local out_file="$STATE_FILE"
   local build_date tmkms_content gnoland_content tmkms_image gnoland_image
-  local sentinel_ref sentinel_digest
+  local sentinel_ref sentinel_digest source_mode gnoland_ref gnoland_digest
   build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  source_mode="$(gnoland_source_mode)"
   tmkms_content="$(content_hash_for tmkms)"
   gnoland_content="$(content_hash_for gnoland)"
   tmkms_image="${TMKMS_IMAGE}:$(image_tag_for tmkms "$GNO_COMMIT_HASH")"
@@ -586,6 +784,12 @@ write_build_state() {
   sentinel_ref="$(sentinel_image_ref)"
   sentinel_digest="$(sentinel_local_digest)"
   [[ -z "$sentinel_digest" ]] && sentinel_digest="$(sentinel_remote_digest)"
+  # What was actually pulled, preferred over what the tag resolves to now: this
+  # is the value gnoland_pinned_ref hands to `docker run`, so it has to be the
+  # image on this host, not the registry's current answer.
+  gnoland_ref="$(gnoland_image_ref)"
+  gnoland_digest="$(gnoland_local_digest)"
+  [[ -z "$gnoland_digest" ]] && gnoland_digest="$(gnoland_remote_digest)"
 
   local tmp
   tmp="$(mktemp "${out_file}.tmp.XXXXXX")" || return 1
@@ -597,6 +801,8 @@ write_build_state() {
     echo ""
     echo "BUILD_DATE=\"${build_date}\""
     echo ""
+    echo "GNOLAND_SOURCE_MODE=\"${source_mode}\""
+    echo ""
     echo "GNO_REPO=\"${GNO_REPO}\""
     echo "GNO_VERSION=\"${GNO_VERSION}\""
     echo "GNO_COMMIT=\"${GNO_COMMIT_HASH}\""
@@ -605,7 +811,12 @@ write_build_state() {
     echo "GNOLAND_CONTENT_HASH=\"${gnoland_content}\""
     echo ""
     echo "TMKMS_IMAGE_TAG=\"${tmkms_image}\""
-    echo "GNOLAND_IMAGE_TAG=\"${gnoland_image}\""
+    if [[ "$source_mode" == "image" ]]; then
+      echo "GNOLAND_IMAGE_REF=\"${gnoland_ref}\""
+      echo "GNOLAND_IMAGE_DIGEST=\"${gnoland_digest}\""
+    else
+      echo "GNOLAND_IMAGE_TAG=\"${gnoland_image}\""
+    fi
     echo ""
     echo "SENTINEL_IMAGE_REF=\"${sentinel_ref}\""
     echo "SENTINEL_IMAGE_DIGEST=\"${sentinel_digest}\""
@@ -645,6 +856,39 @@ read_build_state_as_prev() {
 # GNO_REPO/GNO_VERSION/GNO_COMMIT_HASH set.
 build_state_drift_summary() {
   local drift=0
+
+  # Image mode: the gno repo/ref/commit comparisons below have nothing to
+  # compare (they are empty on both sides), and the gnoland content hash
+  # covers a Dockerfile that no longer produces this binary. What can drift is
+  # the ref the operator names and the digest its tag resolves to.
+  #
+  # docker/gnoland-entrypoint.sh is deliberately NOT tracked here: image mode
+  # bind-mounts it rather than baking it in, so an edit takes effect on the
+  # next start with nothing to rebuild or re-pull.
+  if [[ "$(gnoland_source_mode)" == "image" ]]; then
+    local curr_ref curr_remote curr_tmkms_img
+    curr_ref="$(gnoland_image_ref)"
+    if [[ "${PREV_GNOLAND_IMAGE_REF:-}" != "$curr_ref" ]]; then
+      echo "  gnoland image ref changed: ${PREV_GNOLAND_IMAGE_REF:-<none>} → ${curr_ref}"
+      drift=1
+    else
+      curr_remote="$(gnoland_remote_digest)"
+      if [[ -n "$curr_remote" && -n "${PREV_GNOLAND_IMAGE_DIGEST:-}" &&
+        "$curr_remote" != "${PREV_GNOLAND_IMAGE_DIGEST}" ]]; then
+        local prev_short="${PREV_GNOLAND_IMAGE_DIGEST#sha256:}"
+        local curr_short="${curr_remote#sha256:}"
+        echo "  gnoland image advanced on ${curr_ref##*:}: ${prev_short:0:12} → ${curr_short:0:12}"
+        drift=1
+      fi
+    fi
+    # tmkms is built from this repo's Dockerfile in either source mode.
+    curr_tmkms_img="$(content_hash_for tmkms)"
+    if [[ "$(signer_mode)" == "local" && "${PREV_TMKMS_CONTENT_HASH:-}" != "${curr_tmkms_img}" ]]; then
+      echo "  tmkms image content changed (Dockerfile or docker/tmkms-entrypoint.sh)"
+      drift=1
+    fi
+    return "$drift"
+  fi
 
   if [[ "${PREV_GNO_REPO:-}" != "${GNO_REPO:-}" ]]; then
     echo "  gno repo changed: ${PREV_GNO_REPO:-<none>} → ${GNO_REPO:-<none>}"
@@ -981,6 +1225,8 @@ init_gnoland_data() {
     -e GNOLAND_INIT_ONLY=1
     -v "${PROJECT_ROOT}/${GNOLAND_DATA}:/gnoland-data"
   )
+  _set_gnoland_run_image_args
+  args+=("${_GNOLAND_RUN_IMAGE_ARGS[@]+"${_GNOLAND_RUN_IMAGE_ARGS[@]}"}")
   if [[ -f "$OVERRIDES_FILE" ]]; then
     args+=(-v "${PROJECT_ROOT}/${OVERRIDES_FILE}:/config.overrides:ro")
   fi
@@ -1187,7 +1433,7 @@ _print_validator_identity() {
 }
 
 cmd_gen_identity() {
-  preflight docker env_note
+  preflight docker env_note gno_source
   resolve_signer_mode
   ensure_images build-if-missing
   drift_analyze
@@ -1316,7 +1562,7 @@ _infos_field_trunc() {
 }
 
 cmd_infos() {
-  preflight docker env_note
+  preflight docker env_note gno_source
   ensure_images warn-if-stale
 
   # Initialize gnoland-data on first run so subsequent config reads succeed.
@@ -1362,10 +1608,19 @@ cmd_infos() {
 
   echo "=== Build Information ==="
   local label_reason="image label not set — rebuild with 'make update'"
-  _infos_field "build date" "$label_reason" image_label "$GNOLAND_IMAGE" build.date
-  _infos_field "gno repo" "$label_reason" image_label "$GNOLAND_IMAGE" gno.repo
-  _infos_field "gno version" "$label_reason" image_label "$GNOLAND_IMAGE" gno.version
-  _infos_field "gno commit" "$label_reason" image_label "$GNOLAND_IMAGE" gno.commit
+  if [[ "$(gnoland_source_mode)" == "image" ]]; then
+    # A prebuilt image carries none of the gno.* labels this repo's Dockerfile
+    # writes, so the ref and the digest are the identity here. The digest is
+    # the one that matters: it is what the container is actually started from.
+    local pull_reason="image not pulled yet — run 'make build'"
+    _infos_field "gnoland image" "$pull_reason" gnoland_image_ref
+    _infos_field "image digest" "$pull_reason" gnoland_local_digest
+  else
+    _infos_field "build date" "$label_reason" image_label "$GNOLAND_IMAGE" build.date
+    _infos_field "gno repo" "$label_reason" image_label "$GNOLAND_IMAGE" gno.repo
+    _infos_field "gno version" "$label_reason" image_label "$GNOLAND_IMAGE" gno.version
+    _infos_field "gno commit" "$label_reason" image_label "$GNOLAND_IMAGE" gno.commit
+  fi
   # What the binary itself reports, which is what an upgrade gate reads. Only a
   # v<X.Y.Z> release tag parses as a version: "develop" or "<ref>.<N>+<sha>"
   # satisfies no halt_min_version and is refused at a coordinated halt.
@@ -1385,7 +1640,7 @@ cmd_infos() {
 }
 
 cmd_build() {
-  preflight docker env_note
+  preflight docker env_note gno_source
   resolve_signer_mode
   resolve_gno_inputs
 
@@ -1395,12 +1650,18 @@ cmd_build() {
   [[ "$SIGNER_MODE" == "local" ]] && build_tmkms=1
 
   local repo="$GNO_REPO" version="$GNO_VERSION" commit="$GNO_COMMIT_HASH"
+  local source_mode
+  source_mode="$(gnoland_source_mode)"
   BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   DOCKERFILE_HASH="$(sha256_of_file Dockerfile)"
   export BUILD_DATE DOCKERFILE_HASH
 
   echo "Build inputs:"
-  echo "  repo=${repo}  version=${version}  commit=${commit:0:12}"
+  if [[ "$source_mode" == "image" ]]; then
+    echo "  image=$(gnoland_pinned_ref)"
+  else
+    echo "  repo=${repo}  version=${version}  commit=${commit:0:12}"
+  fi
   echo "  dockerfile sha256=${DOCKERFILE_HASH:0:12}"
   ((build_tmkms == 1)) && echo "  tmkms: local mode — building tmkms image too"
   echo ""
@@ -1421,7 +1682,19 @@ cmd_build() {
         [[ "${PREV_TMKMS_CONTENT_HASH:-}" == "${curr_tmkms}" ]] &&
           docker image inspect "${PREV_TMKMS_IMAGE_TAG:-}" >/dev/null 2>&1 || tmkms_ok=0
       fi
-      if [[ "${PREV_GNO_COMMIT:-}" == "${commit}" &&
+      if [[ "$source_mode" == "image" ]]; then
+        # Image mode compares the ref, not the gno inputs — those are empty
+        # here and would compare equal to anything. Whether the TAG still
+        # points at the recorded digest is drift, reported by drift_analyze;
+        # this check only answers "is there anything to fetch".
+        if [[ "${PREV_GNOLAND_IMAGE_REF:-}" == "$(gnoland_image_ref)" ]] &&
+          ((tmkms_ok == 1)) &&
+          docker image inspect "$GNOLAND_IMAGE" >/dev/null 2>&1; then
+          echo "Nothing to pull — .build-state and the local image match ${PREV_GNOLAND_IMAGE_REF}."
+          echo "  (pass force=1 to pull anyway)"
+          return "$RC_UNCHANGED"
+        fi
+      elif [[ "${PREV_GNO_COMMIT:-}" == "${commit}" &&
         "${PREV_GNO_VERSION:-}" == "${version}" &&
         "${PREV_GNO_REPO:-}" == "${repo}" &&
         "${PREV_GNOLAND_CONTENT_HASH:-}" == "${curr_gnoland}" ]] &&
@@ -1448,18 +1721,32 @@ cmd_build() {
 
   ENTRYPOINT_HASH="$(sha256_of_file docker/gnoland-entrypoint.sh)"
   export ENTRYPOINT_HASH
-  echo "==> Building gnoland image..."
-  if ! _compose build gnoland; then
-    err_build_failed
-    return 1
-  fi
 
-  local gnoland_tag
-  gnoland_tag="$(image_tag_for gnoland "$commit")"
-  docker tag "$GNOLAND_IMAGE" "${GNOLAND_IMAGE}:${gnoland_tag}"
-  echo ""
-  echo "Tagged:"
-  echo "  ${GNOLAND_IMAGE}:${gnoland_tag}"
+  if [[ "$source_mode" == "image" ]]; then
+    echo "==> Pulling the gnoland image..."
+    if ! gnoland_pull; then
+      err_gnoland_pull_failed
+      return 1
+    fi
+    echo ""
+    echo "Pulled:"
+    echo "  $(gnoland_pinned_ref)"
+  else
+    echo "==> Building gnoland image..."
+    if ! _compose build gnoland; then
+      err_build_failed
+      return 1
+    fi
+
+    # The commit-derived tag is build mode's identity for an image. Image mode
+    # has a better one already — the digest — so it is not retagged here.
+    local gnoland_tag
+    gnoland_tag="$(image_tag_for gnoland "$commit")"
+    docker tag "$GNOLAND_IMAGE" "${GNOLAND_IMAGE}:${gnoland_tag}"
+    echo ""
+    echo "Tagged:"
+    echo "  ${GNOLAND_IMAGE}:${gnoland_tag}"
+  fi
   if ((build_tmkms == 1)); then
     local tmkms_tag
     tmkms_tag="$(image_tag_for tmkms "$commit")"
@@ -1483,7 +1770,7 @@ cmd_build() {
 }
 
 cmd_start() {
-  preflight docker env_note genesis tmkms_key
+  preflight docker env_note gno_source genesis tmkms_key
   resolve_signer_mode
   classify_state
   resolve_input_hashes
@@ -1559,7 +1846,7 @@ cmd_stop() {
 }
 
 cmd_restart() {
-  preflight docker env_note genesis tmkms_key
+  preflight docker env_note gno_source genesis tmkms_key
   resolve_signer_mode
   classify_state
   if [[ "$STATE_OVERALL" == "none" ]]; then
@@ -1696,7 +1983,7 @@ _cmd_logs_cleanup() {
 }
 
 cmd_status() {
-  preflight docker env_note
+  preflight docker env_note gno_source
   classify_state
   local watch_interval="${WATCH:-}"
   resolve_ports
@@ -1849,8 +2136,10 @@ cmd_status_json() {
     --arg gnoland "${STATE_GNOLAND:-absent}" \
     --arg sentinel "${STATE_SENTINEL:-absent}" \
     --argjson net "$net_json" \
+    --arg gnoland_source "$(gnoland_source_mode)" \
     '{
       containers:    $containers,
+      gnoland_source: $gnoland_source,
       gnoland:       $gnoland,
       sentinel:      $sentinel,
       rpc_reachable: $reachable,
@@ -2029,7 +2318,7 @@ _classify_stale_tags() {
 }
 
 cmd_clean_imgs() {
-  preflight docker env_note
+  preflight docker env_note gno_source
   local all="${ALL:-0}" skip_prompt="${YES:-0}"
   resolve_gno_inputs skip-commit
 
@@ -2136,7 +2425,7 @@ cmd_clean_imgs() {
 }
 
 cmd_update() {
-  preflight docker env_note genesis tmkms_key
+  preflight docker env_note gno_source genesis tmkms_key
   resolve_signer_mode
   local force="${FORCE:-0}"
   resolve_gno_inputs
