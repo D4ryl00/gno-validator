@@ -716,6 +716,72 @@ assert_contains "$out" "--entrypoint /entrypoint.sh" "the data-dir init selects 
 assert_contains "$out" "-w /" "the data-dir init pins the working directory in image mode"
 
 echo ""
+echo "== status-json argv size =="
+
+# A node with many peers returns a /net_info body of hundreds of kilobytes —
+# every peer's full node_info. Passing it to jq as `--argjson net "$net_json"`
+# puts it in a single argv entry, and Linux caps one entry at MAX_ARG_STRLEN
+# (128 KiB) however much room ARG_MAX has left. Past that, exec fails with
+# E2BIG, the shell reports 126, and status-json prints nothing at all — which
+# reads downstream as "node unreachable" on a node that is perfectly healthy.
+#
+# Asserting on argv rather than on a large payload: macOS has no per-argument
+# limit, so a size-based test would pass here and fail only in production.
+# Exported, not interpolated: with_fresh_env runs the snippet in its own bash,
+# which inherits the environment but not this shell's variables.
+export ARGLOG FAKE_JQ BIG_NET
+ARGLOG="$(mktemp)"
+FAKE_JQ="$(mktemp -d)/jq"
+cat >"$FAKE_JQ" <<'FAKE'
+#!/bin/sh
+for a in "$@"; do printf '%s\n' "${#a}"; done >>"$ARGLOG"
+cat >/dev/null
+echo '{}'
+FAKE
+chmod +x "$FAKE_JQ"
+
+# ~200 KiB of peers, the shape tm2 actually returns.
+BIG_PEER='{"node_info":{"moniker":"peer","network":"gnoland-1","version":"heads/chain/mainnet.3436+00417a1be","channels":"40202122233038","other":{"tx_index":"on","rpc_address":"tcp://0.0.0.0:26657"}},"is_outbound":true,"connection_status":{"Duration":123456789}}'
+BIG_NET="$(
+  printf '{"result":{"n_peers":"40","peers":['
+  for i in $(seq 1 400); do
+    [[ "$i" -gt 1 ]] && printf ','
+    printf '%s' "$BIG_PEER"
+  done
+  printf ']}}'
+)"
+
+STATUS_STUBS_BIG='preflight() { :; }
+resolve_signer_mode() { :; }
+classify_state() { STATE_OVERALL="running"; STATE_GNOLAND="running"; STATE_SENTINEL="running"; }
+resolve_ports() { GNOLAND_RPC_PORT=26657; }
+_http_get() { case "$1" in *net_info) printf "%s" "$BIG_NET" ;; *) echo "{}" ;; esac; }'
+
+with_fresh_env 'GNO_VERSION=master' "$STATUS_STUBS_BIG
+ensure_jq() { echo \"\$FAKE_JQ\"; }
+cmd_status_json" >/dev/null 2>&1
+
+MAX_ARG="$(sort -n "$ARGLOG" 2>/dev/null | tail -1)"
+MAX_ARG="${MAX_ARG:-0}"
+if ((MAX_ARG > 0 && MAX_ARG < 8192)); then
+  ok "no single jq argument carries the /net_info payload (largest was ${MAX_ARG} bytes)"
+elif ((MAX_ARG == 0)); then
+  bad "no single jq argument carries the /net_info payload (jq was never invoked — the test proved nothing)"
+else
+  bad "no single jq argument carries the /net_info payload (largest was ${MAX_ARG} bytes; exec fails past 131072)"
+fi
+
+# And the count itself must still be right, through the real jq.
+if [[ -n "${JQ_FOR_TESTS:-}" ]] || JQ_FOR_TESTS="$(command -v jq)"; then
+  out="$(with_fresh_env 'GNO_VERSION=master' "$STATUS_STUBS_BIG
+ensure_jq() { command -v jq; }
+cmd_status_json" 2>/dev/null)"
+  assert_eq "40" "$(printf '%s' "$out" | "$JQ_FOR_TESTS" -r '.peers')" \
+    "the peer count survives a large /net_info body"
+fi
+rm -f "$ARGLOG"
+
+echo ""
 echo "== status-json =="
 
 assert_json_field() {

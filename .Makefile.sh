@@ -2125,6 +2125,19 @@ cmd_status_json() {
   fi
   [[ -z "$net_json" ]] && net_json='{}'
 
+  # Reduce /net_info to the one number this needs, here, through jq's stdin.
+  #
+  # The body is unbounded: it carries every peer's full node_info, so a
+  # well-connected node answers with hundreds of kilobytes. Handing that to the
+  # jq below as `--argjson net "$net_json"` puts it in a single argv entry, and
+  # Linux caps one entry at MAX_ARG_STRLEN (128 KiB) however much room ARG_MAX
+  # has left. Past that, exec fails with E2BIG — the shell reports 126,
+  # status-json prints nothing, and every consumer reads that silence as an
+  # unreachable node. Stdin has no such limit.
+  local peers
+  peers="$(printf '%s' "$net_json" | "$jq_bin" -r '(.result.n_peers // "0") | tostring' 2>/dev/null || true)"
+  [[ "$peers" =~ ^[0-9]+$ ]] || peers=0
+
   # --argjson for the booleans so they land unquoted; tonumber? on the height
   # and peer counts because tm2 returns them as JSON strings. catching_up
   # can't use the same `// true` fallback: jq's // treats `false` itself as
@@ -2135,7 +2148,7 @@ cmd_status_json() {
     --arg containers "${STATE_OVERALL:-none}" \
     --arg gnoland "${STATE_GNOLAND:-absent}" \
     --arg sentinel "${STATE_SENTINEL:-absent}" \
-    --argjson net "$net_json" \
+    --arg peers "$peers" \
     --arg gnoland_source "$(gnoland_source_mode)" \
     '{
       containers:    $containers,
@@ -2145,7 +2158,7 @@ cmd_status_json() {
       rpc_reachable: $reachable,
       height:        ((.result.sync_info.latest_block_height // "0") | tonumber? // 0),
       catching_up:   (if $reachable then (.result.sync_info.catching_up as $c | if $c == null then true else $c end) else true end),
-      peers:         (($net.result.n_peers // "0") | tonumber? // 0),
+      peers:         ($peers | tonumber? // 0),
       voting_power:  (.result.validator_info.voting_power // ""),
       moniker:       (.result.node_info.moniker // ""),
       network:       (.result.node_info.network // "")
